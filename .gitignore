@@ -20,3 +20,6 @@ Thumbs.db
 
 # Docs
 docs/
+
+# Local SDD tooling config
+openspec/
