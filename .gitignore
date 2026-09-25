@@ -1,0 +1,22 @@
+# PlatformIO build artifacts
+.pio/
+.pioenvs/
+
+# SDD/agent skill registry cache (local only)
+.atl/
+
+# Credentials & secrets — never commit these
+include/config.h
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# VS Code artifacts
+.vscode/
+
+# SQL artifacts 
+*.sql
+
+# Docs
+docs/
