@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
-#include <cstdlib>
+#include <random>
 
 HardwareSerial Serial;
 
@@ -34,6 +34,10 @@ void HardwareSerial::printf(const char *format, ...)
 namespace
 {
     const std::chrono::steady_clock::time_point PROCESS_START = std::chrono::steady_clock::now();
+
+    // Fixed seed keeps jitter-dependent tests reproducible run to run;
+    // mt19937_64 covers a 64-bit long, unlike MinGW's 15-bit rand().
+    std::mt19937_64 randomEngine(0x5EEDu);
 }
 
 unsigned long millis()
@@ -49,5 +53,8 @@ long random(long minValue, long maxValue)
         return minValue;
     }
 
-    return minValue + (std::rand() % (maxValue - minValue));
+    // The distribution maps the range without computing maxValue - minValue,
+    // so neither modulo bias nor signed overflow can occur.
+    std::uniform_int_distribution<long> distribution(minValue, maxValue - 1);
+    return distribution(randomEngine);
 }
