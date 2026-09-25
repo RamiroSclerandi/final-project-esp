@@ -1,0 +1,12 @@
+# Formatting policy for firmware sources, derived from the style already in
+# the tree. CI runs it check-only on the lines a change touches
+# (git clang-format --diff); the existing tree is never mass-reformatted.
+BasedOnStyle: Microsoft
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+NamespaceIndentation: All
+PointerAlignment: Right
+SortIncludes: Never
+AllowShortFunctionsOnASingleLine: Inline
+FixNamespaceComments: false

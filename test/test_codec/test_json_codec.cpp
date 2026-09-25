@@ -21,10 +21,12 @@ namespace
      * @brief Reads a fixture file whole. Shared by every case below so a
      *        golden mismatch always reports the same, obvious cause.
      */
-    std::string readFixture(const char *path)
+    std::string readFixture(const char *name)
     {
-        FILE *file = std::fopen(path, "rb");
-        TEST_ASSERT_NOT_NULL_MESSAGE(file, path);
+        const std::string path =
+            std::string(NATIVE_PROJECT_DIR) + "/test/fixtures/datalogger.v1/" + name;
+        FILE *file = std::fopen(path.c_str(), "rb");
+        TEST_ASSERT_NOT_NULL_MESSAGE(file, path.c_str());
 
         std::string content;
         char chunk[256];
@@ -71,7 +73,7 @@ void test_valid_payload_matches_golden(void)
     JsonCodec codec;
     const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
 
-    const std::string golden = readFixture("test/fixtures/datalogger.v1/valid.json");
+    const std::string golden = readFixture("valid.json");
     TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
     TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
 }
@@ -95,7 +97,7 @@ void test_oversize_payload_guards_to_empty_output(void)
     JsonCodec codec;
     const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
 
-    const std::string golden = readFixture("test/fixtures/datalogger.v1/oversize.json");
+    const std::string golden = readFixture("oversize.json");
     TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
     TEST_ASSERT_EQUAL_UINT32(0, written);
     TEST_ASSERT_EQUAL_UINT8('\0', out[0]);
