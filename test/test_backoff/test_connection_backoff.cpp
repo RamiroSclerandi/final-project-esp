@@ -41,8 +41,11 @@ void test_record_failure_increments_failures_and_delays_retry(void)
     backoff.recordFailure();
 
     TEST_ASSERT_EQUAL_UINT32(1, backoff.consecutiveFailures());
-    // INITIAL_DELAY_MS (1000ms) minus jitter is still far longer than this
-    // assertion takes to run, so the next attempt is not due yet.
+    // millis() is a virtual counter here (lib/native_support/Arduino.cpp):
+    // it only moves when a test calls nativeAdvanceMillis(), which this test
+    // never does. So no time has passed since recordFailure() scheduled the
+    // next attempt, and shouldRetry() is deterministically false — not
+    // "false because the assertion ran fast enough".
     TEST_ASSERT_FALSE(backoff.shouldRetry());
 }
 
