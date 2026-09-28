@@ -74,6 +74,25 @@ void test_ticks_are_milliseconds(void)
     TEST_ASSERT_EQUAL_UINT32(5000, pdMS_TO_TICKS(5000));
 }
 
+void test_give_from_non_owner_is_rejected(void)
+{
+    // A real FreeRTOS mutex (unlike a plain counting semaphore) tracks its
+    // owner and refuses xSemaphoreGive() from any other task.
+    SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
+    xSemaphoreTake(mutex, portMAX_DELAY);
+
+    BaseType_t giveResult = pdTRUE;
+    std::thread contender([&]() { giveResult = xSemaphoreGive(mutex); });
+    contender.join();
+
+    TEST_ASSERT_EQUAL(pdFALSE, giveResult);
+    // Still held: a take from elsewhere must still time out.
+    TEST_ASSERT_EQUAL(pdFALSE, takeFromOtherThread(mutex, pdMS_TO_TICKS(20)));
+
+    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreGive(mutex));
+    vSemaphoreDelete(mutex);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -81,5 +100,6 @@ int main(void)
     RUN_TEST(test_held_mutex_times_out_for_another_task);
     RUN_TEST(test_forced_timeout_fails_take_on_free_mutex);
     RUN_TEST(test_ticks_are_milliseconds);
+    RUN_TEST(test_give_from_non_owner_is_rejected);
     return UNITY_END();
 }
