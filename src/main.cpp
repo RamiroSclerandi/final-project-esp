@@ -10,6 +10,8 @@
 #include "config/Provisioning.h"
 #include "core/DeviceInfo.h"
 #include "core/MeasurementAccumulator.h"
+#include "core/SamplingDelay.h"
+#include "core/TransmitSchedule.h"
 #include "codec/JsonCodec.h"
 #include "sensors/SensorRegistry.h"
 #include "sensors/BMP280Sensor.h"
@@ -111,6 +113,26 @@ static PayloadMeta buildMeta()
 }
 
 // ---------------------------------------------------------------------------
+// Sleeps one sampling interval in watchdog-sized chunks. The interval is
+// re-read per chunk so a remote change applies within the current wait.
+// ---------------------------------------------------------------------------
+static void waitForNextSample()
+{
+    const uint32_t waitStart = millis();
+    while (true)
+    {
+        esp_task_wdt_reset();
+        const uint32_t chunk = SamplingDelay::nextChunkMs(
+            millis() - waitStart, samplingInterval.load(), SamplingDelay::WDT_SLICE_MS);
+        if (chunk == 0)
+        {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(chunk));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // sensorTask — Core 0
 //
 // Samples every registered sensor at the sampling interval and emits one
@@ -124,7 +146,8 @@ static void sensorTask(void *pvParameters)
     esp_task_wdt_add(nullptr);
 
     accumulator.reset(registry);
-    uint32_t lastTransmit = millis();
+    const uint32_t taskStart = millis();
+    uint32_t lastTransmit = taskStart;
     bool first = true;
 
     while (true)
@@ -135,7 +158,12 @@ static void sensorTask(void *pvParameters)
         accumulator.accumulate(registry);
 
         const uint32_t now = millis();
-        if (first || (now - lastTransmit >= transmitInterval.load()))
+        const bool isDue =
+            first
+                ? TransmitSchedule::isFirstSendAllowed(DeviceInfo::isClockSynced(), now, taskStart)
+                : TransmitSchedule::isDue(now, lastTransmit, transmitInterval.load(),
+                                          samplingInterval.load());
+        if (isDue)
         {
             first = false;
             lastTransmit = now;
@@ -177,7 +205,7 @@ static void sensorTask(void *pvParameters)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(samplingInterval.load()));
+        waitForNextSample();
     }
 }
 
