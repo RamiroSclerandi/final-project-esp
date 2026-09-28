@@ -44,3 +44,22 @@ and the `meta_lost_*` fixtures all omit the `meta.store` object because
 their `PayloadMeta.storeKind` is `nullptr` in the test setup, not because
 the field does not exist; production always sets `storeKind`, so a real
 device's payloads carry `meta.store.drop` alongside `meta.lost`.
+
+## seq gap invariant (G-10)
+
+`meta.lost` and `meta.store.drop` count two different categories of
+device-side loss, and only one of them ever explains a `seq` gap:
+
+- `meta.lost` — PRE-EMISSION drops: a reading discarded before its `seq`
+  was ever assigned (failed encode, oversize guard, or
+  queue-full-and-buffer-append-failure). `seq` was never stamped for these,
+  so they never open a gap.
+- `meta.store.drop` — POST-EMISSION drops: a record whose `seq` WAS already
+  assigned, then lost from local storage — either evicted under space
+  pressure, or lost when networkTask's send failed and its own re-append
+  also failed. Both leave a `seq` gap.
+
+So: `seq gap = transport/broker loss + Δmeta.store.drop`, and
+`total device loss = Δmeta.lost + Δmeta.store.drop`. Subtracting
+`Δmeta.store.drop` (never `Δmeta.lost`) from an observed `seq` gap isolates
+true transport/broker loss.

@@ -9,10 +9,14 @@
 #include "config/DeviceConfig.h"
 #include "config/Provisioning.h"
 #include "core/DeviceInfo.h"
+#include "core/EmissionLedger.h"
 #include "core/EmissionOutcome.h"
 #include "core/MeasurementAccumulator.h"
+#include "core/ModbusAvailability.h"
+#include "core/ModbusBuildFlag.h"
 #include "core/SamplingDelay.h"
 #include "core/TransmitSchedule.h"
+#include "core/WatchdogConfig.h"
 #include "codec/JsonCodec.h"
 #include "sensors/SensorRegistry.h"
 #include "sensors/BMP280Sensor.h"
@@ -36,19 +40,6 @@
 #ifndef MODBUS_BAUD_RATE
 #define MODBUS_BAUD_RATE 9600
 #endif
-
-// Off by default: the Modbus stack and its RS-485 wiring are the least
-// commonly populated part of the board, and excluding it keeps its symbols
-// out of a build that never uses it. Override with -DDL_ENABLE_MODBUS=1.
-#ifndef DL_ENABLE_MODBUS
-#define DL_ENABLE_MODBUS 0
-#endif
-
-// Must comfortably exceed the longest legitimate blocking operation, which is
-// the WiFi association plus the TLS handshake (5-15 s in the worst case). A
-// watchdog that fires on a healthy system is worse than none: it produces a
-// reboot loop that looks exactly like the fault it was meant to catch.
-static constexpr uint32_t WDT_TIMEOUT_S = 30;
 
 // Last resort for a link that never recovers. Only safe now that unsent
 // readings are persisted locally: without the buffer, a restart would discard
@@ -95,35 +86,31 @@ static ITransport *transport = nullptr;
 static QueueHandle_t dataQueue;
 static std::atomic<uint32_t> samplingInterval;
 static std::atomic<uint32_t> transmitInterval;
-static std::atomic<uint32_t> sequenceCounter;
-
-// Cumulative device-side losses since this boot (meta.lost). RAM only: a
-// reboot is the only thing that resets it, matching meta.boot.
-static std::atomic<uint32_t> lostPayloads;
 static uint32_t bootCount = 0;
 
-// Reported once, on the first message after a restart.
-static const char *pendingResetReason = nullptr;
+// Owns seq/meta.lost/pendingResetReason (G-10). Single writer (sensorTask),
+// so it needs no synchronization — see include/core/EmissionLedger.h.
+static EmissionLedger emissionLedger;
 
 // ---------------------------------------------------------------------------
 // Fills the node telemetry that travels alongside the readings.
 //
-// Reads sequenceCounter/pendingResetReason without consuming them: both are
-// only advanced/cleared by onPayloadEmitted(), once this reading is actually
-// handed to transport/buffer (G-10). A payload that never gets that far
-// (encode failure, oversize, queue-full-and-buffer-fail) is discarded before
-// its meta is ever used, so seq stays gap-free and the reset reason is still
-// reported on the next attempt.
+// Reads the ledger without consuming it: seq/pendingResetReason are only
+// advanced/cleared by emissionLedger.recordSendAttempt(), once this reading
+// is actually handed to transport/buffer (G-10). A payload that never gets
+// that far (encode failure, oversize, queue-full-and-buffer-fail) is
+// discarded before its meta is ever used, so seq stays gap-free and the
+// reset reason is still reported on the next attempt.
 // ---------------------------------------------------------------------------
 static PayloadMeta buildMeta()
 {
     PayloadMeta meta;
     meta.rssi = transport != nullptr ? transport->linkQuality() : 0;
-    meta.sequence = sequenceCounter.load();
+    meta.sequence = emissionLedger.sequence();
     meta.bootCount = bootCount;
-    meta.lostCount = lostPayloads.load();
+    meta.lostCount = emissionLedger.lostCount();
 
-    meta.resetReason = pendingResetReason;
+    meta.resetReason = emissionLedger.pendingResetReason();
 
     meta.storeKind = localBuffer.kind();
     meta.storeUsedPct = localBuffer.usedPercent();
@@ -131,18 +118,6 @@ static PayloadMeta buildMeta()
     meta.storeDropped = localBuffer.droppedCount();
 
     return meta;
-}
-
-/**
- * Called once a reading has actually been handed to transport/buffer (a
- * successful xQueueSend or localBuffer.append) — the point where `seq` is
- * assigned and the pending reset reason is consumed (G-10). Single writer
- * (sensorTask), so plain relaxed ops are enough.
- */
-static void onPayloadEmitted()
-{
-    sequenceCounter.fetch_add(1, std::memory_order_relaxed);
-    pendingResetReason = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,14 +218,7 @@ static void sensorTask(void *pvParameters)
 
             // seq/pendingResetReason advance only on an actual emission;
             // anything else is a pre-emission device-side loss (meta.lost).
-            if (EmissionOutcome::isEmitted(attempt))
-            {
-                onPayloadEmitted();
-            }
-            else
-            {
-                lostPayloads.fetch_add(1, std::memory_order_relaxed);
-            }
+            emissionLedger.recordSendAttempt(attempt);
 
             switch (attempt)
             {
@@ -332,9 +300,11 @@ static void networkTask(void *pvParameters)
             else if (!localBuffer.append((const uint8_t *)reading.payload, length))
             {
                 // Post-emission double failure: seq was already stamped for
-                // this reading, so this shows up downstream as a seq gap
-                // AND a meta.lost increment (G-10) — not a silent loss.
-                lostPayloads.fetch_add(1, std::memory_order_relaxed);
+                // this reading, so this shows up downstream as a seq gap.
+                // The loss itself belongs in meta.store.drop, not meta.lost
+                // — the record is gone from local storage the same way an
+                // eviction is, not a pre-emission device drop (G-10).
+                localBuffer.recordEmittedLoss();
                 Serial.printf("[%s] Envio fallido y sin respaldo — PERDIDO.\n",
                               transport->name());
             }
@@ -376,6 +346,16 @@ static void registerConfiguredSensors()
     if (deviceConfig.isSensorEnabled(SensorKey::MODBUS_METER))
     {
         registry.add(&energyMeter);
+    }
+#else
+    // The NVS flag is left untouched here — only visibility changes. Without
+    // this, a device provisioned with the meter enabled silently reports no
+    // Modbus channels, with nothing on serial to explain why.
+    if (ModbusAvailability::isConfiguredButExcluded(
+            false, deviceConfig.isSensorEnabled(SensorKey::MODBUS_METER)))
+    {
+        Serial.println("[WARNING] Medidor Modbus configurado pero excluido de este build "
+                       "(DL_ENABLE_MODBUS=0) — sin datos de Modbus.");
     }
 #endif
 
@@ -429,12 +409,13 @@ void setup()
     Serial.begin(115200);
     delay(500);
 
-    pendingResetReason = DeviceInfo::resetReason();
+    const char *resetReason = DeviceInfo::resetReason();
+    emissionLedger.reset(resetReason);
 
     Serial.println("\n========================================");
     Serial.println(" Datalogger ESP32 — Booting");
     Serial.printf(" Device ID: %s\n", DeviceInfo::deviceId());
-    Serial.printf(" Reinicio previo: %s\n", pendingResetReason);
+    Serial.printf(" Reinicio previo: %s\n", resetReason);
     Serial.println("========================================");
 
     // 1. Restore configuration and run the setup menu if needed
@@ -453,8 +434,6 @@ void setup()
 
     samplingInterval.store(deviceConfig.samplingIntervalMs());
     transmitInterval.store(deviceConfig.transmitIntervalMs());
-    sequenceCounter.store(0);
-    lostPayloads.store(0);
     bootCount = deviceConfig.nextBootCount();
     Serial.printf("[Config] Arranque numero %lu\n", (unsigned long)bootCount);
 
@@ -500,7 +479,7 @@ void setup()
     }
 
     // 9. Watchdog, armed before the tasks it supervises exist
-    esp_task_wdt_init(WDT_TIMEOUT_S, true); // true = panic and reboot on timeout
+    esp_task_wdt_init(WatchdogConfig::TIMEOUT_S, true); // true = panic and reboot on timeout
 
     // 10. Spawn FreeRTOS tasks
     xTaskCreatePinnedToCore(sensorTask, "SensorTask", 8192, nullptr, 1, nullptr, 0);
