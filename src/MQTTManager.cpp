@@ -2,6 +2,7 @@
 
 #include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
+#include "transport/MqttTimeouts.h"
 
 #include <WiFi.h>
 #include <Arduino.h>
@@ -127,6 +128,8 @@ MQTTManager::MQTTManager(const char *caCert)
     _mqttClient.setCallback(_onMessageStatic);
     _mqttClient.setBufferSize(1024); // Fits the datalogger.v1 payload plus header
     _mqttClient.setKeepAlive(60);
+    _mqttClient.setSocketTimeout(MqttTimeouts::SOCKET_TIMEOUT_S);
+    _wifiClient.setHandshakeTimeout(MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S);
 }
 
 void MQTTManager::configure(const char *host, uint16_t port,

@@ -2,11 +2,23 @@
 
 #include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
+#include "core/ProvisioningTimeout.h"
 
 #include <Arduino.h>
 
+// Mirrors the same fallback in main.cpp: off by default, overridden by the
+// build (see platformio.ini). Needed here too so the menu can show it as
+// disabled instead of offering a toggle that main.cpp will never act on.
+#ifndef DL_ENABLE_MODBUS
+#define DL_ENABLE_MODBUS 0
+#endif
+
 namespace
 {
+    // Returned by waitForKey() when no input arrived within the timeout.
+    // Never produced by a real keypress: only c > 0x20 is accepted there.
+    constexpr char NO_KEY = '\0';
+
     void drainSerialInput()
     {
         while (Serial.available())
@@ -15,9 +27,14 @@ namespace
         }
     }
 
-    /** Blocks until a printable character arrives. */
+    /**
+     * Blocks until a printable character arrives, or returns NO_KEY after
+     * ProvisioningTimeout::INPUT_TIMEOUT_MS with no input — a headless boot
+     * (no serial terminal attached) must not hang here forever.
+     */
     char waitForKey()
     {
+        const uint32_t waitStart = millis();
         while (true)
         {
             if (Serial.available())
@@ -28,20 +45,32 @@ namespace
                     return (char)c;
                 }
             }
+            if (ProvisioningTimeout::hasTimedOut(millis(), waitStart))
+            {
+                return NO_KEY;
+            }
             delay(20);
         }
     }
 
-    /** Reads a decimal number terminated by Enter. Returns fallback if empty. */
+    /**
+     * Reads a decimal number terminated by Enter. Returns fallback if empty
+     * or if ProvisioningTimeout::INPUT_TIMEOUT_MS elapses with no input.
+     */
     uint32_t readNumber(uint32_t fallback)
     {
         char buffer[16] = {0};
         uint8_t length = 0;
+        const uint32_t waitStart = millis();
 
         while (true)
         {
             if (!Serial.available())
             {
+                if (ProvisioningTimeout::hasTimedOut(millis(), waitStart))
+                {
+                    return fallback;
+                }
                 delay(20);
                 continue;
             }
@@ -160,8 +189,12 @@ namespace
                       config.isSensorEnabled(SensorKey::BMP280) ? "SI" : "no");
         Serial.printf(" 3) DHT22 (temp/humedad) ... %s\n",
                       config.isSensorEnabled(SensorKey::DHT22) ? "SI" : "no");
+#if DL_ENABLE_MODBUS
         Serial.printf(" 4) Medidor Modbus ......... %s\n",
                       config.isSensorEnabled(SensorKey::MODBUS_METER) ? "SI" : "no");
+#else
+        Serial.println(" 4) Medidor Modbus ......... deshabilitado en este build");
+#endif
         Serial.printf(" 5) Intervalo de muestreo .. %lu ms\n",
                       (unsigned long)config.samplingIntervalMs());
         Serial.printf(" 6) Intervalo de envio ..... %lu ms\n",
@@ -190,18 +223,28 @@ namespace
         Serial.print("  Opcion: ");
 
         const char key = waitForKey();
-        Serial.println(key);
 
         if (key == '1')
         {
+            Serial.println(key);
             config.setTransport(TransportKind::WIFI_MQTT);
         }
         else if (key == '2')
         {
+            Serial.println(key);
             config.setTransport(TransportKind::LORAWAN);
+        }
+        else if (key == NO_KEY)
+        {
+            // No input within the timeout: fall back to the transport most
+            // devices use, so a headless boot with no transport chosen yet
+            // does not spin in runIfNeeded's "must pick a transport" loop.
+            Serial.println("  Sin respuesta - se usa WiFi + MQTT por defecto.");
+            config.setTransport(TransportKind::WIFI_MQTT);
         }
         else
         {
+            Serial.println(key);
             Serial.println("  Opcion invalida, sin cambios.");
         }
     }
@@ -228,7 +271,11 @@ namespace
             toggleSensor(config, SensorKey::DHT22, "DHT22");
             return false;
         case '4':
+#if DL_ENABLE_MODBUS
             toggleSensor(config, SensorKey::MODBUS_METER, "Medidor Modbus");
+#else
+            Serial.println("\n  Medidor Modbus deshabilitado en este build.");
+#endif
             return false;
 
         case '5': {
@@ -330,6 +377,16 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
     {
         printMenu(config);
         const char choice = waitForKey();
+
+        if (choice == NO_KEY)
+        {
+            // Headless boot or an operator who walked away: stop prompting
+            // and continue with whatever configuration already exists
+            // (seeded defaults on a first boot) instead of hanging here.
+            Serial.println("\n[Setup] Sin respuesta - se continua con la configuracion actual.");
+            break;
+        }
+
         Serial.println(choice);
 
         if (handleChoice(config, choice))
