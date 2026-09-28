@@ -54,6 +54,12 @@ jobs:
         run: cp include/config.example.h include/config.h
       - name: Build firmware
         run: pio run -e esp32dev
+      # No hardware in CI: compiles test/test_target/ (WDT + cross-core
+      # buffer checks) against env:esp32dev-test without flashing or running
+      # it, so a change that breaks the on-target suite's build is still
+      # caught here instead of only at the next manual hardware run.
+      - name: Build on-target test suite (no hardware)
+        run: pio test -e esp32dev-test --without-uploading --without-testing
 
   format:
     if: github.event_name == 'pull_request'
