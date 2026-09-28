@@ -130,6 +130,9 @@ MQTTManager::MQTTManager(const char *caCert)
     _mqttClient.setKeepAlive(60);
     _mqttClient.setSocketTimeout(MqttTimeouts::SOCKET_TIMEOUT_S);
     _wifiClient.setHandshakeTimeout(MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S);
+    // Bounds the raw TCP connect() phase, which otherwise defaults to 30 s
+    // (WiFiClientSecure's own constructor default) — see MqttTimeouts.h.
+    _wifiClient.setTimeout(MqttTimeouts::TCP_CONNECT_TIMEOUT_S);
 }
 
 void MQTTManager::configure(const char *host, uint16_t port,
