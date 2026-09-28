@@ -1,19 +1,35 @@
-// Characterizes the CURRENT behavior of LittleFsBuffer (v1.1.0) against the
-// in-memory LittleFS fake in lib/native_support/. No production logic
-// changes in this PR; the concurrency guard and its RED test land in PR3.
+// LittleFsBuffer against the in-memory LittleFS fake in lib/native_support/:
+// storage behavior plus the cross-task guard (mutex, lock timeout, peek token).
 #include <unity.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #include <LittleFS.h>
+#include <freertos/semphr.h>
 
 #include "storage/LittleFsBuffer.h"
 
 namespace
 {
     constexpr size_t RECORD_BYTES = 1000;
+    constexpr size_t RECORD_FILE_BYTES = RECORD_BYTES + 1; // payload + newline
+    constexpr int RECORDS_THAT_FIT = (int)(LittleFsBuffer::MAX_BYTES / RECORD_FILE_BYTES);
+    constexpr int DROPS_TO_CROSS_COMPACT =
+        (int)(LittleFsBuffer::COMPACT_THRESHOLD / RECORD_FILE_BYTES) + 1;
+    // A handful more than DROPS_TO_CROSS_COMPACT, so the compaction test still
+    // has records left pending after crossing the threshold.
+    constexpr int RECORDS_FOR_COMPACT_TEST = DROPS_TO_CROSS_COMPACT + 7;
+
+    std::string indexText(int index)
+    {
+        char text[5];
+        std::snprintf(text, sizeof(text), "%04d", index);
+        return text;
+    }
 
     bool appendText(LittleFsBuffer &buffer, const char *text)
     {
@@ -31,9 +47,7 @@ namespace
     bool appendIndexedRecord(LittleFsBuffer &buffer, int index)
     {
         std::string record(RECORD_BYTES, 'x');
-        char prefix[5];
-        std::snprintf(prefix, sizeof(prefix), "%04d", index);
-        record.replace(0, 4, prefix);
+        record.replace(0, 4, indexText(index));
         return buffer.append((const uint8_t *)record.data(), record.size());
     }
 
@@ -51,7 +65,10 @@ void setUp()
     LittleFS.format();
 }
 
-void tearDown() {}
+void tearDown()
+{
+    nativeForceSemaphoreTimeout(false);
+}
 
 void test_begin_on_empty_fs_mounts_with_nothing_pending(void)
 {
@@ -149,37 +166,108 @@ void test_full_buffer_evicts_oldest_and_counts_drop(void)
     LittleFsBuffer buffer;
     buffer.begin();
 
-    // 204 records of 1001 bytes (payload + newline) fit under MAX_BYTES; the
-    // 205th forces exactly one eviction.
-    for (int index = 0; index < 205; index++)
+    // One record past capacity forces exactly one eviction.
+    for (int index = 0; index <= RECORDS_THAT_FIT; index++)
     {
         TEST_ASSERT_TRUE(appendIndexedRecord(buffer, index));
     }
 
     TEST_ASSERT_EQUAL_UINT32(1, buffer.droppedCount());
-    TEST_ASSERT_EQUAL_UINT32(204, buffer.pendingCount());
+    TEST_ASSERT_EQUAL_UINT32(RECORDS_THAT_FIT, buffer.pendingCount());
     TEST_ASSERT_EQUAL_STRING("0001", peekText(buffer, 5).c_str());
-    TEST_ASSERT_EQUAL_UINT8(99, buffer.usedPercent());
+    const size_t liveBytes = RECORDS_THAT_FIT * RECORD_FILE_BYTES;
+    TEST_ASSERT_EQUAL_UINT8(liveBytes * 100 / LittleFsBuffer::MAX_BYTES, buffer.usedPercent());
 }
 
 void test_consumed_prefix_is_compacted_past_threshold(void)
 {
     LittleFsBuffer buffer;
     buffer.begin();
-    for (int index = 0; index < 40; index++)
+    for (int index = 0; index < RECORDS_FOR_COMPACT_TEST; index++)
     {
         appendIndexedRecord(buffer, index);
     }
 
-    // 33 x 1001 bytes is the first drop that crosses COMPACT_THRESHOLD (32 KiB).
-    for (int dropped = 0; dropped < 33; dropped++)
+    for (int dropped = 0; dropped < DROPS_TO_CROSS_COMPACT; dropped++)
     {
         TEST_ASSERT_TRUE(buffer.dropOldest());
     }
 
-    TEST_ASSERT_EQUAL_UINT32(7, buffer.pendingCount());
-    TEST_ASSERT_EQUAL_STRING("0033", peekText(buffer, 5).c_str());
-    TEST_ASSERT_EQUAL_UINT32(7 * (RECORD_BYTES + 1), recordsFileSize());
+    const int remaining = RECORDS_FOR_COMPACT_TEST - DROPS_TO_CROSS_COMPACT;
+    TEST_ASSERT_EQUAL_UINT32(remaining, buffer.pendingCount());
+    TEST_ASSERT_EQUAL_STRING(indexText(DROPS_TO_CROSS_COMPACT).c_str(),
+                             peekText(buffer, 5).c_str());
+    TEST_ASSERT_EQUAL_UINT32(remaining * RECORD_FILE_BYTES, recordsFileSize());
+    TEST_ASSERT_EQUAL_UINT32(0, buffer.droppedCount());
+}
+
+void test_drop_after_eviction_keeps_the_unsent_record(void)
+{
+    LittleFsBuffer buffer;
+    buffer.begin();
+    for (int index = 0; index < RECORDS_THAT_FIT; index++)
+    {
+        appendIndexedRecord(buffer, index);
+    }
+
+    // networkTask peeks record 0; before it confirms the send, sensorTask's
+    // append evicts that record. The late drop must not discard record 1.
+    TEST_ASSERT_EQUAL_STRING("0000", peekText(buffer, 5).c_str());
+    TEST_ASSERT_TRUE(appendIndexedRecord(buffer, RECORDS_THAT_FIT));
+    TEST_ASSERT_FALSE(buffer.dropOldest());
+
+    TEST_ASSERT_EQUAL_STRING("0001", peekText(buffer, 5).c_str());
+    TEST_ASSERT_EQUAL_UINT32(RECORDS_THAT_FIT, buffer.pendingCount());
+}
+
+void test_lock_timeout_rejects_operations_without_side_effects(void)
+{
+    LittleFsBuffer buffer;
+    buffer.begin();
+    appendText(buffer, "kept");
+
+    nativeForceSemaphoreTimeout(true);
+    TEST_ASSERT_FALSE(appendText(buffer, "rejected"));
+    TEST_ASSERT_EQUAL_STRING("", peekText(buffer).c_str());
+    TEST_ASSERT_FALSE(buffer.dropOldest());
+    nativeForceSemaphoreTimeout(false);
+
+    TEST_ASSERT_EQUAL_UINT32(1, buffer.pendingCount());
+    TEST_ASSERT_EQUAL_STRING("kept", peekText(buffer).c_str());
+}
+
+void test_concurrent_append_and_drain_serialize(void)
+{
+    // Enough drains to cross COMPACT_THRESHOLD, so compaction races the writer.
+    constexpr int RECORD_COUNT = 2 * DROPS_TO_CROSS_COMPACT;
+    LittleFsBuffer buffer;
+    buffer.begin();
+
+    std::thread writer([&]() {
+        for (int index = 0; index < RECORD_COUNT; index++)
+        {
+            appendIndexedRecord(buffer, index);
+        }
+    });
+
+    int drained = 0;
+    bool isInOrder = true;
+    const auto giveUpAt = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (drained < RECORD_COUNT && isInOrder && std::chrono::steady_clock::now() < giveUpAt)
+    {
+        const std::string head = peekText(buffer, 5);
+        if (head.empty())
+        {
+            continue;
+        }
+        isInOrder = head == indexText(drained);
+        drained += buffer.dropOldest() ? 1 : 0;
+    }
+    writer.join();
+
+    TEST_ASSERT_TRUE(isInOrder);
+    TEST_ASSERT_EQUAL(RECORD_COUNT, drained);
+    TEST_ASSERT_EQUAL_UINT32(0, buffer.pendingCount());
     TEST_ASSERT_EQUAL_UINT32(0, buffer.droppedCount());
 }
 
@@ -195,5 +283,8 @@ int main(void)
     RUN_TEST(test_stale_offset_past_end_restarts_from_first_record);
     RUN_TEST(test_full_buffer_evicts_oldest_and_counts_drop);
     RUN_TEST(test_consumed_prefix_is_compacted_past_threshold);
+    RUN_TEST(test_drop_after_eviction_keeps_the_unsent_record);
+    RUN_TEST(test_lock_timeout_rejects_operations_without_side_effects);
+    RUN_TEST(test_concurrent_append_and_drain_serialize);
     return UNITY_END();
 }

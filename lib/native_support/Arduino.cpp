@@ -1,7 +1,6 @@
 #include "Arduino.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <random>
@@ -34,30 +33,29 @@ void HardwareSerial::printf(const char *format, ...)
 
 namespace
 {
-    const std::chrono::steady_clock::time_point PROCESS_START = std::chrono::steady_clock::now();
-
     // Fixed seed keeps jitter-dependent tests reproducible run to run;
     // mt19937_64 covers a 64-bit long, unlike MinGW's 15-bit rand().
     std::mt19937_64 randomEngine(0x5EEDu);
 
-    std::atomic<unsigned long> millisOffset{0};
+    // A pure counter, not tied to wall-clock time: real time elapsing between
+    // a stamp and a read must never change the result on host, or exact-millis
+    // assertions become flaky depending on how the process got scheduled.
+    std::atomic<unsigned long> millisValue{0};
 }
 
 unsigned long millis()
 {
-    const auto elapsed = std::chrono::steady_clock::now() - PROCESS_START;
-    return (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() +
-           millisOffset.load();
+    return millisValue.load();
 }
 
 void nativeAdvanceMillis(unsigned long deltaMs)
 {
-    millisOffset.fetch_add(deltaMs);
+    millisValue.fetch_add(deltaMs);
 }
 
 void nativeResetMillisOffset()
 {
-    millisOffset.store(0);
+    millisValue.store(0);
 }
 
 long random(long minValue, long maxValue)

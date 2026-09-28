@@ -115,15 +115,22 @@ static PayloadMeta buildMeta()
 // ---------------------------------------------------------------------------
 // Sleeps one sampling interval in watchdog-sized chunks. The interval is
 // re-read per chunk so a remote change applies within the current wait.
+//
+// While the first send is still pending, the wait is capped to the first-send
+// timeout: otherwise a long samplingInterval would delay it well past that
+// timeout, since the transmit gate is only re-checked once the wait returns.
 // ---------------------------------------------------------------------------
-static void waitForNextSample()
+static void waitForNextSample(bool firstSendPending)
 {
     const uint32_t waitStart = millis();
     while (true)
     {
         esp_task_wdt_reset();
-        const uint32_t chunk = SamplingDelay::nextChunkMs(
-            millis() - waitStart, samplingInterval.load(), SamplingDelay::WDT_SLICE_MS);
+        const uint32_t effectiveInterval =
+            SamplingDelay::effectiveIntervalMs(samplingInterval.load(), firstSendPending,
+                                               TransmitSchedule::FIRST_SEND_SYNC_TIMEOUT_MS);
+        const uint32_t chunk = SamplingDelay::nextChunkMs(millis() - waitStart, effectiveInterval,
+                                                          SamplingDelay::WDT_SLICE_MS);
         if (chunk == 0)
         {
             return;
@@ -205,7 +212,7 @@ static void sensorTask(void *pvParameters)
             }
         }
 
-        waitForNextSample();
+        waitForNextSample(first);
     }
 }
 

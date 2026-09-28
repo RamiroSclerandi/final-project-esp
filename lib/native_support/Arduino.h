@@ -19,8 +19,9 @@ public:
 
 extern HardwareSerial Serial;
 
-/** @return Milliseconds elapsed since the test process started, plus any
- *          offset applied by nativeAdvanceMillis(). */
+/** @return A virtual clock in milliseconds. Starts at 0 and only moves when
+ *          a test calls nativeAdvanceMillis() — real wall-clock time passing
+ *          never changes it, so exact-millis assertions stay deterministic. */
 unsigned long millis();
 
 /** @return Pseudo-random value in [minValue, maxValue). Not cryptographic. */
@@ -32,5 +33,5 @@ long random(long minValue, long maxValue);
  */
 void nativeAdvanceMillis(unsigned long deltaMs);
 
-/** Test-only: clears any shift applied by nativeAdvanceMillis(). */
+/** Test-only: resets millis() back to 0. */
 void nativeResetMillisOffset();
