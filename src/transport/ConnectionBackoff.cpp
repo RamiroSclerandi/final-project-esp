@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+ConnectionBackoff::ConnectionBackoff() : _lastSuccessAt(millis()) {}
+
 bool ConnectionBackoff::shouldRetry()
 {
     return (int32_t)(millis() - _nextAttemptAt) >= 0;
@@ -47,5 +49,5 @@ uint32_t ConnectionBackoff::consecutiveFailures() const
 
 uint32_t ConnectionBackoff::millisSinceSuccess() const
 {
-    return _lastSuccessAt == 0 ? 0 : millis() - _lastSuccessAt;
+    return millis() - _lastSuccessAt;
 }
