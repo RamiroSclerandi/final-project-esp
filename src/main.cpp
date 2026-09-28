@@ -9,6 +9,7 @@
 #include "config/DeviceConfig.h"
 #include "config/Provisioning.h"
 #include "core/DeviceInfo.h"
+#include "core/EmissionOutcome.h"
 #include "core/MeasurementAccumulator.h"
 #include "core/SamplingDelay.h"
 #include "core/TransmitSchedule.h"
@@ -34,6 +35,13 @@
 #endif
 #ifndef MODBUS_BAUD_RATE
 #define MODBUS_BAUD_RATE 9600
+#endif
+
+// Off by default: the Modbus stack and its RS-485 wiring are the least
+// commonly populated part of the board, and excluding it keeps its symbols
+// out of a build that never uses it. Override with -DDL_ENABLE_MODBUS=1.
+#ifndef DL_ENABLE_MODBUS
+#define DL_ENABLE_MODBUS 0
 #endif
 
 // Must comfortably exceed the longest legitimate blocking operation, which is
@@ -62,8 +70,10 @@ struct SensorReading
 // ---------------------------------------------------------------------------
 static BMP280Sensor bmpSensor(Wire, 0x76);
 static DHT22Sensor dhtSensor(DHT_DATA_PIN);
+#if DL_ENABLE_MODBUS
 static ModbusEnergyMeter energyMeter(Serial2, RS485_DE_PIN,
                                      MODBUS_SLAVE_ID, MODBUS_BAUD_RATE);
+#endif
 
 static SensorRegistry registry;
 static MeasurementAccumulator accumulator;
@@ -86,6 +96,10 @@ static QueueHandle_t dataQueue;
 static std::atomic<uint32_t> samplingInterval;
 static std::atomic<uint32_t> transmitInterval;
 static std::atomic<uint32_t> sequenceCounter;
+
+// Cumulative device-side losses since this boot (meta.lost). RAM only: a
+// reboot is the only thing that resets it, matching meta.boot.
+static std::atomic<uint32_t> lostPayloads;
 static uint32_t bootCount = 0;
 
 // Reported once, on the first message after a restart.
@@ -93,16 +107,23 @@ static const char *pendingResetReason = nullptr;
 
 // ---------------------------------------------------------------------------
 // Fills the node telemetry that travels alongside the readings.
+//
+// Reads sequenceCounter/pendingResetReason without consuming them: both are
+// only advanced/cleared by onPayloadEmitted(), once this reading is actually
+// handed to transport/buffer (G-10). A payload that never gets that far
+// (encode failure, oversize, queue-full-and-buffer-fail) is discarded before
+// its meta is ever used, so seq stays gap-free and the reset reason is still
+// reported on the next attempt.
 // ---------------------------------------------------------------------------
 static PayloadMeta buildMeta()
 {
     PayloadMeta meta;
     meta.rssi = transport != nullptr ? transport->linkQuality() : 0;
-    meta.sequence = sequenceCounter.fetch_add(1);
+    meta.sequence = sequenceCounter.load();
     meta.bootCount = bootCount;
+    meta.lostCount = lostPayloads.load();
 
     meta.resetReason = pendingResetReason;
-    pendingResetReason = nullptr;
 
     meta.storeKind = localBuffer.kind();
     meta.storeUsedPct = localBuffer.usedPercent();
@@ -110,6 +131,18 @@ static PayloadMeta buildMeta()
     meta.storeDropped = localBuffer.droppedCount();
 
     return meta;
+}
+
+/**
+ * Called once a reading has actually been handed to transport/buffer (a
+ * successful xQueueSend or localBuffer.append) — the point where `seq` is
+ * assigned and the pending reset reason is consumed (G-10). Single writer
+ * (sensorTask), so plain relaxed ops are enough.
+ */
+static void onPayloadEmitted()
+{
+    sequenceCounter.fetch_add(1, std::memory_order_relaxed);
+    pendingResetReason = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,29 +219,60 @@ static void sensorTask(void *pvParameters)
             // encode cannot let stale samples leak into the next message.
             accumulator.reset(registry);
 
+            EmissionOutcome::SendAttempt attempt;
             if (written == 0)
             {
-                Serial.println("[Sensor] El payload no entra en el buffer — descartado.");
+                attempt = EmissionOutcome::SendAttempt::EncodeFailed;
             }
             else if (transport != nullptr && written > transport->maxPayloadSize())
             {
+                attempt = EmissionOutcome::SendAttempt::OversizeForTransport;
+            }
+            else if (xQueueSend(dataQueue, &reading, pdMS_TO_TICKS(100)) == pdTRUE)
+            {
+                attempt = EmissionOutcome::SendAttempt::QueuedOk;
+            }
+            else if (localBuffer.append((const uint8_t *)reading.payload, written))
+            {
+                attempt = EmissionOutcome::SendAttempt::BufferedOk;
+            }
+            else
+            {
+                attempt = EmissionOutcome::SendAttempt::QueueFullAndBufferFailed;
+            }
+
+            // seq/pendingResetReason advance only on an actual emission;
+            // anything else is a pre-emission device-side loss (meta.lost).
+            if (EmissionOutcome::isEmitted(attempt))
+            {
+                onPayloadEmitted();
+            }
+            else
+            {
+                lostPayloads.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            switch (attempt)
+            {
+            case EmissionOutcome::SendAttempt::EncodeFailed:
+                Serial.println("[Sensor] El payload no entra en el buffer — descartado.");
+                break;
+            case EmissionOutcome::SendAttempt::OversizeForTransport:
                 Serial.printf("[Sensor] Payload de %u B supera el limite de %s (%u B).\n",
                               (unsigned)written, transport->name(),
                               (unsigned)transport->maxPayloadSize());
-            }
-            else if (xQueueSend(dataQueue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
-            {
-                // The link is down and the in-RAM queue is full. Persisting here
-                // is what keeps the reading instead of dropping it.
-                if (localBuffer.append((const uint8_t *)reading.payload, written))
-                {
-                    Serial.printf("[Sensor] Cola llena — guardado local (%lu pendientes).\n",
-                                  (unsigned long)localBuffer.pendingCount());
-                }
-                else
-                {
-                    Serial.println("[Sensor] Cola llena y sin respaldo — lectura PERDIDA.");
-                }
+                break;
+            case EmissionOutcome::SendAttempt::BufferedOk:
+                // The link is down and the in-RAM queue is full; persisting
+                // here is what keeps the reading instead of dropping it.
+                Serial.printf("[Sensor] Cola llena — guardado local (%lu pendientes).\n",
+                              (unsigned long)localBuffer.pendingCount());
+                break;
+            case EmissionOutcome::SendAttempt::QueueFullAndBufferFailed:
+                Serial.println("[Sensor] Cola llena y sin respaldo — lectura PERDIDA.");
+                break;
+            case EmissionOutcome::SendAttempt::QueuedOk:
+                break;
             }
         }
 
@@ -267,6 +331,10 @@ static void networkTask(void *pvParameters)
             }
             else if (!localBuffer.append((const uint8_t *)reading.payload, length))
             {
+                // Post-emission double failure: seq was already stamped for
+                // this reading, so this shows up downstream as a seq gap
+                // AND a meta.lost increment (G-10) — not a silent loss.
+                lostPayloads.fetch_add(1, std::memory_order_relaxed);
                 Serial.printf("[%s] Envio fallido y sin respaldo — PERDIDO.\n",
                               transport->name());
             }
@@ -304,10 +372,12 @@ static void registerConfiguredSensors()
         registry.add(&dhtSensor);
     }
 
+#if DL_ENABLE_MODBUS
     if (deviceConfig.isSensorEnabled(SensorKey::MODBUS_METER))
     {
         registry.add(&energyMeter);
     }
+#endif
 
     if (registry.sensorCount() == 0)
     {
@@ -384,6 +454,7 @@ void setup()
     samplingInterval.store(deviceConfig.samplingIntervalMs());
     transmitInterval.store(deviceConfig.transmitIntervalMs());
     sequenceCounter.store(0);
+    lostPayloads.store(0);
     bootCount = deviceConfig.nextBootCount();
     Serial.printf("[Config] Arranque numero %lu\n", (unsigned long)bootCount);
 

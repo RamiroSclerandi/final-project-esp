@@ -1,7 +1,8 @@
-// Characterizes the CURRENT byte-for-byte output of JsonCodec (v1.1.0).
-// These fixtures ARE the canonical datalogger.v1 contract: the backend
-// ingest worker must accept them unchanged (see spec
-// datalogger-v1-contract-fixtures). No production logic changes in this PR.
+// Byte-for-byte characterization of JsonCodec's datalogger.v1 output. These
+// fixtures ARE the canonical contract: the backend ingest worker must accept
+// them unchanged (see spec datalogger-v1-contract-fixtures). PR4 adds the
+// meta.lost field (see the meta_lost_* cases below); the rest of the
+// envelope shape is unchanged since firmware 1.1.0.
 #include <unity.h>
 
 #include <cstdio>
@@ -103,10 +104,62 @@ void test_oversize_payload_guards_to_empty_output(void)
     TEST_ASSERT_EQUAL_UINT8('\0', out[0]);
 }
 
+void test_meta_lost_zero_matches_golden(void)
+{
+    SensorRegistry registry;
+    Measurement channels[2];
+    FakeSensor sensor("TestSensor", channels, 2);
+    MeasurementAccumulator accumulator;
+    buildTwoChannelAccumulator(registry, sensor, channels, accumulator);
+
+    PayloadMeta meta{};
+    meta.rssi = -55;
+    meta.sequence = 42;
+    meta.bootCount = 1;
+    meta.lostCount = 0;
+    meta.resetReason = nullptr;
+    meta.storeKind = nullptr;
+
+    uint8_t out[512];
+    JsonCodec codec;
+    const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
+
+    const std::string golden = readFixture("meta_lost_zero.json");
+    TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
+    TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
+}
+
+void test_meta_lost_nonzero_matches_golden(void)
+{
+    SensorRegistry registry;
+    Measurement channels[2];
+    FakeSensor sensor("TestSensor", channels, 2);
+    MeasurementAccumulator accumulator;
+    buildTwoChannelAccumulator(registry, sensor, channels, accumulator);
+
+    PayloadMeta meta{};
+    meta.rssi = -55;
+    meta.sequence = 42;
+    meta.bootCount = 1;
+    meta.lostCount = 3;
+    meta.resetReason = nullptr;
+    meta.storeKind = nullptr;
+
+    uint8_t out[512];
+    JsonCodec codec;
+    const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
+
+    const std::string golden = readFixture("meta_lost_nonzero.json");
+    TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
+    TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_valid_payload_matches_golden);
     RUN_TEST(test_oversize_payload_guards_to_empty_output);
+    RUN_TEST(test_meta_lost_zero_matches_golden);
+    RUN_TEST(test_meta_lost_nonzero_matches_golden);
     return UNITY_END();
 }

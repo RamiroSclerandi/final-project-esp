@@ -11,4 +11,4 @@
  *
  * Bump the minor version on any payload contract change.
  */
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.2.0"
