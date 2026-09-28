@@ -28,4 +28,18 @@ namespace SamplingDelay
         const uint32_t remaining = intervalMs - elapsedMs;
         return remaining < maxChunkMs ? remaining : maxChunkMs;
     }
+
+    /**
+     * @return `samplingMs`, capped to `firstSendTimeoutMs` while the first
+     *         transmit is still pending. The sampling loop only re-checks the
+     *         transmit gate once per interval, so an uncapped long interval
+     *         (e.g. 300 s) would delay the first send far past the intended
+     *         timeout instead of within it.
+     */
+    inline uint32_t effectiveIntervalMs(uint32_t samplingMs, bool firstSendPending,
+                                        uint32_t firstSendTimeoutMs)
+    {
+        return firstSendPending && firstSendTimeoutMs < samplingMs ? firstSendTimeoutMs
+                                                                   : samplingMs;
+    }
 }
