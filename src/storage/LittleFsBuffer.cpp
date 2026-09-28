@@ -158,7 +158,7 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
         {
             break;
         }
-        _dropped++;
+        _evicted++;
 
         if (_readOffset == before)
         {
@@ -181,13 +181,29 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
 
     compact();
     Serial.printf("[Buffer] Almacenamiento lleno. Total descartados: %lu\n",
-                  (unsigned long)_dropped);
+                  (unsigned long)droppedCount());
+}
+
+void LittleFsBuffer::logLockTimeout(const char *operation) const
+{
+    // Only a real contention timeout, not the "never began" case (mutex
+    // still null): that one is an ordinary early-boot condition, not
+    // something worth alarming an operator about.
+    if (_mutex != nullptr)
+    {
+        Serial.printf("[Buffer] Lock ocupado (%s) — no es almacenamiento lleno.\n", operation);
+    }
 }
 
 bool LittleFsBuffer::append(const uint8_t *payload, size_t length)
 {
     ScopedLock lock(_mutex);
-    if (!lock.isHeld() || !_mounted || length == 0)
+    if (!lock.isHeld())
+    {
+        logLockTimeout("append");
+        return false;
+    }
+    if (!_mounted || length == 0)
     {
         return false;
     }
@@ -248,7 +264,7 @@ size_t LittleFsBuffer::peekOldest(uint8_t *out, size_t outSize)
     file.close();
     out[length] = '\0';
 
-    _peekToken = _dropped;
+    _peekToken = _evicted;
     _hasPeekToken = true;
     return length;
 }
@@ -261,7 +277,7 @@ bool LittleFsBuffer::dropOldest()
         return false;
     }
 
-    const bool isPeekedRecordEvicted = _hasPeekToken && _peekToken != _dropped;
+    const bool isPeekedRecordEvicted = _hasPeekToken && _peekToken != _evicted;
     _hasPeekToken = false;
     return !isPeekedRecordEvicted && dropOldestLocked();
 }
@@ -356,7 +372,14 @@ bool LittleFsBuffer::compact()
 uint8_t LittleFsBuffer::usedPercent() const
 {
     ScopedLock lock(_mutex);
-    if (!lock.isHeld() || !_mounted)
+    if (!lock.isHeld())
+    {
+        // A timeout is contention, not "nothing stored" — the last known
+        // value is a far better answer than a misleading 0.
+        logLockTimeout("usedPercent");
+        return _lastUsedPercent.load();
+    }
+    if (!_mounted)
     {
         return 0;
     }
@@ -372,7 +395,9 @@ uint8_t LittleFsBuffer::usedPercent() const
 
     const size_t live = size > _readOffset ? size - _readOffset : 0;
     const uint32_t percent = (uint32_t)((live * 100) / MAX_BYTES);
-    return percent > 100 ? 100 : (uint8_t)percent;
+    const uint8_t result = percent > 100 ? 100 : (uint8_t)percent;
+    _lastUsedPercent.store(result);
+    return result;
 }
 
 uint32_t LittleFsBuffer::pendingCount() const
@@ -382,7 +407,16 @@ uint32_t LittleFsBuffer::pendingCount() const
 
 uint32_t LittleFsBuffer::droppedCount() const
 {
-    return _dropped;
+    return _evicted + _emittedLoss;
+}
+
+void LittleFsBuffer::recordEmittedLoss()
+{
+    // No lock needed: _emittedLoss is atomic and this never touches the
+    // filesystem. Kept separate from _evicted (see ILocalBuffer::
+    // recordEmittedLoss doc for why this loss belongs in the same reported
+    // total) so it never perturbs the peek token: droppedCount() sums both.
+    _emittedLoss++;
 }
 
 const char *LittleFsBuffer::kind() const
