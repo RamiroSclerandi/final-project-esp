@@ -18,6 +18,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <LittleFS.h>
+
 #include "core/SamplingDelay.h"
 #include "storage/LittleFsBuffer.h"
 
@@ -47,8 +49,10 @@ void tearDown() {}
 
 void test_wdt_is_fed_within_every_slice_of_an_interval_longer_than_one_slice(void)
 {
-    esp_task_wdt_init(WDT_TIMEOUT_S, true);
-    esp_task_wdt_add(nullptr);
+    // An unchecked init/add that silently failed would let the rest of the
+    // test run with no real watchdog behind it — asserting a false pass.
+    TEST_ASSERT_EQUAL(ESP_OK, esp_task_wdt_init(WDT_TIMEOUT_S, true));
+    TEST_ASSERT_EQUAL(ESP_OK, esp_task_wdt_add(nullptr));
 
     // Just over one slice: exercises at least two feeds, nowhere near the
     // 30 s panic timeout, so a healthy run never resets the board.
@@ -70,11 +74,24 @@ void test_wdt_is_fed_within_every_slice_of_an_interval_longer_than_one_slice(voi
         vTaskDelay(pdMS_TO_TICKS(chunk));
     }
 
+    // Deregister before returning: this task stops resetting the watchdog
+    // once the test function returns, and the board would panic roughly
+    // WDT_TIMEOUT_S later — well inside the rest of the suite's runtime —
+    // if it stayed registered.
+    esp_task_wdt_delete(nullptr);
+
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(2, feeds);
 }
 
 void test_concurrent_append_and_drain_across_cores_does_not_corrupt(void)
 {
+    // Format first: a prior test run (or the previous on-target suite) can
+    // leave pending records on the partition, which would make `drained`
+    // land above RECORD_COUNT and the corruption check compare against the
+    // wrong expected index from record 0.
+    TEST_ASSERT_TRUE(LittleFS.begin(true));
+    TEST_ASSERT_TRUE(LittleFS.format());
+
     TEST_ASSERT_TRUE(buffer.begin());
     xTaskCreatePinnedToCore(writerTask, "Writer", 4096, nullptr, 1, nullptr, 0);
 
