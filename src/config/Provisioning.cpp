@@ -2,16 +2,11 @@
 
 #include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
+#include "core/ModbusAvailability.h"
+#include "core/ModbusBuildFlag.h"
 #include "core/ProvisioningTimeout.h"
 
 #include <Arduino.h>
-
-// Mirrors the same fallback in main.cpp: off by default, overridden by the
-// build (see platformio.ini). Needed here too so the menu can show it as
-// disabled instead of offering a toggle that main.cpp will never act on.
-#ifndef DL_ENABLE_MODBUS
-#define DL_ENABLE_MODBUS 0
-#endif
 
 namespace
 {
@@ -54,20 +49,29 @@ namespace
     }
 
     /**
-     * Reads a decimal number terminated by Enter. Returns fallback if empty
-     * or if ProvisioningTimeout::INPUT_TIMEOUT_MS elapses with no input.
+     * Reads a decimal number terminated by Enter. Returns fallback if empty,
+     * if ProvisioningTimeout::INPUT_TIMEOUT_MS elapses with no accepted
+     * input, or once ProvisioningTimeout::HARD_CAP_MS elapses regardless.
+     *
+     * The timeout restarts only on an accepted character (a digit or a
+     * terminator, per ProvisioningTimeout::isAcceptedInputChar) — an
+     * operator typing slowly is still actively responding and must not be
+     * cut off mid-entry — but never on anything else: a noisy or floating
+     * RX line delivering junk bytes must not be able to hold setup() open
+     * forever. HARD_CAP_MS bounds the call even under continuous accepted
+     * input.
      */
     uint32_t readNumber(uint32_t fallback)
     {
         char buffer[16] = {0};
         uint8_t length = 0;
-        const uint32_t waitStart = millis();
+        ProvisioningTimeout::ActivityTimeout timeout(millis());
 
         while (true)
         {
             if (!Serial.available())
             {
-                if (ProvisioningTimeout::hasTimedOut(millis(), waitStart))
+                if (timeout.hasTimedOut(millis()))
                 {
                     return fallback;
                 }
@@ -76,6 +80,10 @@ namespace
             }
 
             const int c = Serial.read();
+            if (ProvisioningTimeout::isAcceptedInputChar(c))
+            {
+                timeout.noteActivity(millis());
+            }
 
             if (c == '\r' || c == '\n')
             {
@@ -193,7 +201,15 @@ namespace
         Serial.printf(" 4) Medidor Modbus ......... %s\n",
                       config.isSensorEnabled(SensorKey::MODBUS_METER) ? "SI" : "no");
 #else
-        Serial.println(" 4) Medidor Modbus ......... deshabilitado en este build");
+        if (ModbusAvailability::isConfiguredButExcluded(
+                false, config.isSensorEnabled(SensorKey::MODBUS_METER)))
+        {
+            Serial.println(" 4) Medidor Modbus ......... configurado, pero excluido de este build");
+        }
+        else
+        {
+            Serial.println(" 4) Medidor Modbus ......... deshabilitado en este build");
+        }
 #endif
         Serial.printf(" 5) Intervalo de muestreo .. %lu ms\n",
                       (unsigned long)config.samplingIntervalMs());
