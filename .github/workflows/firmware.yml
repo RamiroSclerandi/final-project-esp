@@ -70,7 +70,11 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          output=$(git clang-format --diff --extensions c,cpp,h,hpp "origin/${BASE_REF}" || true)
+          if ! output=$(git clang-format --diff --extensions c,cpp,h,hpp "origin/${BASE_REF}"); then
+            echo "$output"
+            echo "git clang-format failed to run" >&2
+            exit 1
+          fi
           echo "$output"
           case "$output" in
             "" | *"no modified files to format"* | *"clang-format did not modify any files"*) exit 0 ;;

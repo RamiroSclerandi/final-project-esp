@@ -19,8 +19,18 @@ public:
 
 extern HardwareSerial Serial;
 
-/** @return Milliseconds elapsed since the test process started. */
+/** @return Milliseconds elapsed since the test process started, plus any
+ *          offset applied by nativeAdvanceMillis(). */
 unsigned long millis();
 
 /** @return Pseudo-random value in [minValue, maxValue). Not cryptographic. */
 long random(long minValue, long maxValue);
+
+/**
+ * Test-only: shifts millis() forward by deltaMs, so tests can simulate time
+ * passing (e.g. a 30-minute offline window) without a real-time wait.
+ */
+void nativeAdvanceMillis(unsigned long deltaMs);
+
+/** Test-only: clears any shift applied by nativeAdvanceMillis(). */
+void nativeResetMillisOffset();

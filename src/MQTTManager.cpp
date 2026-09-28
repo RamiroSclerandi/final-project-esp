@@ -1,5 +1,6 @@
 #include "MQTTManager.h"
 
+#include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
 
 #include <WiFi.h>
@@ -368,8 +369,7 @@ void MQTTManager::_onMessage(char *topic, byte *payload, unsigned int length)
     {
         int newInterval = doc["samplingInterval"].as<int>();
 
-        // Sanity check: accept values between 1 second and 5 minutes.
-        if (newInterval >= 1000 && newInterval <= 300000)
+        if (ConfigLimits::isValidSamplingIntervalMs((uint32_t)newInterval))
         {
             Serial.printf("[MQTT] Config remota — samplingInterval: %d ms\n",
                           newInterval);

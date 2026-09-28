@@ -1,5 +1,6 @@
 #include "Arduino.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -38,12 +39,25 @@ namespace
     // Fixed seed keeps jitter-dependent tests reproducible run to run;
     // mt19937_64 covers a 64-bit long, unlike MinGW's 15-bit rand().
     std::mt19937_64 randomEngine(0x5EEDu);
+
+    std::atomic<unsigned long> millisOffset{0};
 }
 
 unsigned long millis()
 {
     const auto elapsed = std::chrono::steady_clock::now() - PROCESS_START;
-    return (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    return (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() +
+           millisOffset.load();
+}
+
+void nativeAdvanceMillis(unsigned long deltaMs)
+{
+    millisOffset.fetch_add(deltaMs);
+}
+
+void nativeResetMillisOffset()
+{
+    millisOffset.store(0);
 }
 
 long random(long minValue, long maxValue)

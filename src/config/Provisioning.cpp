@@ -1,5 +1,6 @@
 #include "config/Provisioning.h"
 
+#include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
 
 #include <Arduino.h>
@@ -230,10 +231,21 @@ namespace
             toggleSensor(config, SensorKey::MODBUS_METER, "Medidor Modbus");
             return false;
 
-        case '5':
+        case '5': {
             Serial.print("\n\n  Intervalo de muestreo en ms (Enter = sin cambios): ");
-            config.setSamplingIntervalMs(readNumber(config.samplingIntervalMs()));
+            const uint32_t requested = readNumber(config.samplingIntervalMs());
+            if (ConfigLimits::isValidSamplingIntervalMs(requested))
+            {
+                config.setSamplingIntervalMs(requested);
+            }
+            else
+            {
+                Serial.printf("\n  Fuera de rango (%lu..%lu ms), sin cambios.\n",
+                              (unsigned long)ConfigLimits::SAMPLING_INTERVAL_MIN_MS,
+                              (unsigned long)ConfigLimits::SAMPLING_INTERVAL_MAX_MS);
+            }
             return false;
+        }
 
         case '6':
             Serial.print("\n\n  Intervalo de envio en ms (Enter = sin cambios): ");

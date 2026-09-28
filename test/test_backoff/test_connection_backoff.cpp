@@ -1,22 +1,30 @@
-// Characterizes the CURRENT behavior of ConnectionBackoff (v1.1.0),
-// including the known `_lastSuccessAt == 0` sentinel ambiguity fixed later
-// in this change (PR3): a device that never connected and a device that
-// just connected both report millisSinceSuccess() == 0. No production
-// logic changes in this PR — see design's "Backoff" decision.
+// Characterizes ConnectionBackoff (v1.1.0): retry timing, jitter, and the
+// boot-stamped elapsed-since-success clock that drives the offline reboot.
 #include <unity.h>
+
+#include <Arduino.h>
 
 #include "transport/ConnectionBackoff.h"
 
 void setUp() {}
-void tearDown() {}
 
-void test_never_connected_reports_zero_elapsed(void)
+void tearDown()
 {
+    nativeResetMillisOffset();
+}
+
+void test_never_connected_reports_real_elapsed_since_boot(void)
+{
+    // A device that never connects must still see its offline time grow, so
+    // the 30-min reboot threshold is reachable. The old `_lastSuccessAt == 0`
+    // sentinel made this always read 0 and the device never rebooted.
     ConnectionBackoff backoff;
 
-    // This is the sentinel bug this change fixes in PR3: 0 here means "never
-    // connected", but a device that just connected also reads 0.
-    TEST_ASSERT_EQUAL_UINT32(0, backoff.millisSinceSuccess());
+    nativeAdvanceMillis(5000);
+    TEST_ASSERT_EQUAL_UINT32(5000, backoff.millisSinceSuccess());
+
+    nativeAdvanceMillis(30UL * 60UL * 1000UL - 5000);
+    TEST_ASSERT_EQUAL_UINT32(30UL * 60UL * 1000UL, backoff.millisSinceSuccess());
 }
 
 void test_should_retry_immediately_at_boot(void)
@@ -51,24 +59,25 @@ void test_record_success_resets_delay_and_failures(void)
     TEST_ASSERT_TRUE(backoff.shouldRetry());
 }
 
-void test_record_success_sets_last_success_at_near_now(void)
+void test_record_success_resets_elapsed_then_tracks_forward(void)
 {
     ConnectionBackoff backoff;
+    nativeAdvanceMillis(12345);
 
     backoff.recordSuccess();
+    TEST_ASSERT_EQUAL_UINT32(0, backoff.millisSinceSuccess());
 
-    // Generous tolerance: this only guards against gross regressions
-    // (e.g. forgetting to update _lastSuccessAt), not exact timing.
-    TEST_ASSERT_UINT32_WITHIN(50, 0, backoff.millisSinceSuccess());
+    nativeAdvanceMillis(750);
+    TEST_ASSERT_EQUAL_UINT32(750, backoff.millisSinceSuccess());
 }
 
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_never_connected_reports_zero_elapsed);
+    RUN_TEST(test_never_connected_reports_real_elapsed_since_boot);
     RUN_TEST(test_should_retry_immediately_at_boot);
     RUN_TEST(test_record_failure_increments_failures_and_delays_retry);
     RUN_TEST(test_record_success_resets_delay_and_failures);
-    RUN_TEST(test_record_success_sets_last_success_at_near_now);
+    RUN_TEST(test_record_success_resets_elapsed_then_tracks_forward);
     return UNITY_END();
 }
