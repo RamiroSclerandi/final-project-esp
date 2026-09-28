@@ -53,6 +53,35 @@ namespace
         sensor.setValue(1, 0.0f, false);
         accumulator.accumulate(registry);
     }
+
+    /**
+     * @brief Shared by the meta.lost golden cases below, which differ only
+     *        in meta.lostCount and the golden file they must match.
+     */
+    void assertMetaLostEncodesToGolden(uint32_t lostCount, const char *goldenName)
+    {
+        SensorRegistry registry;
+        Measurement channels[2];
+        FakeSensor sensor("TestSensor", channels, 2);
+        MeasurementAccumulator accumulator;
+        buildTwoChannelAccumulator(registry, sensor, channels, accumulator);
+
+        PayloadMeta meta{};
+        meta.rssi = -55;
+        meta.sequence = 42;
+        meta.bootCount = 1;
+        meta.lostCount = lostCount;
+        meta.resetReason = nullptr;
+        meta.storeKind = nullptr;
+
+        uint8_t out[512];
+        JsonCodec codec;
+        const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
+
+        const std::string golden = readFixture(goldenName);
+        TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
+        TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
+    }
 }
 
 void test_valid_payload_matches_golden(void)
@@ -106,52 +135,12 @@ void test_oversize_payload_guards_to_empty_output(void)
 
 void test_meta_lost_zero_matches_golden(void)
 {
-    SensorRegistry registry;
-    Measurement channels[2];
-    FakeSensor sensor("TestSensor", channels, 2);
-    MeasurementAccumulator accumulator;
-    buildTwoChannelAccumulator(registry, sensor, channels, accumulator);
-
-    PayloadMeta meta{};
-    meta.rssi = -55;
-    meta.sequence = 42;
-    meta.bootCount = 1;
-    meta.lostCount = 0;
-    meta.resetReason = nullptr;
-    meta.storeKind = nullptr;
-
-    uint8_t out[512];
-    JsonCodec codec;
-    const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
-
-    const std::string golden = readFixture("meta_lost_zero.json");
-    TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
-    TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
+    assertMetaLostEncodesToGolden(0, "meta_lost_zero.json");
 }
 
 void test_meta_lost_nonzero_matches_golden(void)
 {
-    SensorRegistry registry;
-    Measurement channels[2];
-    FakeSensor sensor("TestSensor", channels, 2);
-    MeasurementAccumulator accumulator;
-    buildTwoChannelAccumulator(registry, sensor, channels, accumulator);
-
-    PayloadMeta meta{};
-    meta.rssi = -55;
-    meta.sequence = 42;
-    meta.bootCount = 1;
-    meta.lostCount = 3;
-    meta.resetReason = nullptr;
-    meta.storeKind = nullptr;
-
-    uint8_t out[512];
-    JsonCodec codec;
-    const size_t written = codec.encode(accumulator, meta, out, sizeof(out));
-
-    const std::string golden = readFixture("meta_lost_nonzero.json");
-    TEST_ASSERT_EQUAL_UINT32(golden.size(), written);
-    TEST_ASSERT_EQUAL_STRING_LEN(golden.c_str(), (const char *)out, golden.size());
+    assertMetaLostEncodesToGolden(3, "meta_lost_nonzero.json");
 }
 
 int main(void)
