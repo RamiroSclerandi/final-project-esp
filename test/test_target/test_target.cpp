@@ -21,11 +21,11 @@
 #include <LittleFS.h>
 
 #include "core/SamplingDelay.h"
+#include "core/WatchdogConfig.h"
 #include "storage/LittleFsBuffer.h"
 
 namespace
 {
-    constexpr uint32_t WDT_TIMEOUT_S = 30;
     constexpr int RECORD_COUNT = 50;
 
     LittleFsBuffer buffer;
@@ -51,7 +51,7 @@ void test_wdt_is_fed_within_every_slice_of_an_interval_longer_than_one_slice(voi
 {
     // An unchecked init/add that silently failed would let the rest of the
     // test run with no real watchdog behind it — asserting a false pass.
-    TEST_ASSERT_EQUAL(ESP_OK, esp_task_wdt_init(WDT_TIMEOUT_S, true));
+    TEST_ASSERT_EQUAL(ESP_OK, esp_task_wdt_init(WatchdogConfig::TIMEOUT_S, true));
     TEST_ASSERT_EQUAL(ESP_OK, esp_task_wdt_add(nullptr));
 
     // Just over one slice: exercises at least two feeds, nowhere near the
@@ -76,7 +76,7 @@ void test_wdt_is_fed_within_every_slice_of_an_interval_longer_than_one_slice(voi
 
     // Deregister before returning: this task stops resetting the watchdog
     // once the test function returns, and the board would panic roughly
-    // WDT_TIMEOUT_S later — well inside the rest of the suite's runtime —
+    // WatchdogConfig::TIMEOUT_S later — well inside the rest of the suite's runtime —
     // if it stayed registered.
     esp_task_wdt_delete(nullptr);
 
