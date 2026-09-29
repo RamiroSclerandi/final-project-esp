@@ -16,10 +16,12 @@ struct PayloadMeta
     const char *resetReason; ///< Why the device last restarted, or nullptr.
 
     /**
-     * Cumulative device-side losses since this boot (failed encode, oversize
+     * Cumulative PRE-EMISSION device-side losses since this boot: a reading
+     * dropped before its `seq` was ever assigned (failed encode, oversize
      * guard, or queue-full-and-buffer-append-failure — see EmissionOutcome).
-     * Always emitted, 0 when nothing was lost, so a downstream consumer can
-     * subtract it from a seq gap to isolate true transport/broker loss (G-10).
+     * Always emitted, 0 when nothing was lost. A pre-emission drop never
+     * opens a `seq` gap by itself, so this field must NOT be subtracted from
+     * one — see `storeDropped` for the field that does (G-10).
      */
     uint32_t lostCount;
 
@@ -28,6 +30,16 @@ struct PayloadMeta
     const char *storeKind; ///< "sd" | "littlefs" | "none", or nullptr to omit.
     uint8_t storeUsedPct;
     uint32_t storePending;
+
+    /**
+     * Cumulative POST-EMISSION device-side losses since this boot: a
+     * record whose `seq` was already assigned, then lost from local
+     * storage — either evicted under space pressure, or lost when
+     * networkTask's send failed and its own re-append also failed. Both
+     * causes open a `seq` gap, so downstream: true transport/broker loss =
+     * (seq gap) − Δ`storeDropped`; total device loss = Δ`lostCount` +
+     * Δ`storeDropped` (G-10).
+     */
     uint32_t storeDropped;
 };
 

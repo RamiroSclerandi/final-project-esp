@@ -220,6 +220,26 @@ void test_drop_after_eviction_keeps_the_unsent_record(void)
     TEST_ASSERT_EQUAL_UINT32(RECORDS_THAT_FIT, buffer.pendingCount());
 }
 
+void test_emitted_loss_between_peek_and_drop_does_not_block_the_drop(void)
+{
+    // recordEmittedLoss() counts a DIFFERENT kind of loss (networkTask's own
+    // re-append failing after a send) and must not be mistaken for an
+    // eviction of the peeked record: only a real eviction between peek()
+    // and dropOldest() may keep an unsent record around.
+    LittleFsBuffer buffer;
+    buffer.begin();
+    appendText(buffer, "first");
+    appendText(buffer, "second");
+
+    TEST_ASSERT_EQUAL_STRING("first", peekText(buffer).c_str());
+    buffer.recordEmittedLoss();
+    TEST_ASSERT_TRUE(buffer.dropOldest());
+
+    TEST_ASSERT_EQUAL_STRING("second", peekText(buffer).c_str());
+    TEST_ASSERT_EQUAL_UINT32(1, buffer.pendingCount());
+    TEST_ASSERT_EQUAL_UINT32(1, buffer.droppedCount());
+}
+
 void test_lock_timeout_rejects_operations_without_side_effects(void)
 {
     LittleFsBuffer buffer;
@@ -234,6 +254,24 @@ void test_lock_timeout_rejects_operations_without_side_effects(void)
 
     TEST_ASSERT_EQUAL_UINT32(1, buffer.pendingCount());
     TEST_ASSERT_EQUAL_STRING("kept", peekText(buffer).c_str());
+}
+
+void test_used_percent_returns_last_known_value_on_lock_timeout(void)
+{
+    // A lock timeout is contention, not an empty buffer: returning 0 would
+    // misreport a healthy, populated buffer as empty in that message's meta.
+    LittleFsBuffer buffer;
+    buffer.begin();
+    for (int index = 0; index <= RECORDS_THAT_FIT / 2; index++)
+    {
+        appendIndexedRecord(buffer, index);
+    }
+    const uint8_t lastKnown = buffer.usedPercent();
+    TEST_ASSERT_GREATER_THAN_UINT8(0, lastKnown);
+
+    nativeForceSemaphoreTimeout(true);
+    TEST_ASSERT_EQUAL_UINT8(lastKnown, buffer.usedPercent());
+    nativeForceSemaphoreTimeout(false);
 }
 
 void test_concurrent_append_and_drain_serialize(void)
@@ -284,7 +322,9 @@ int main(void)
     RUN_TEST(test_full_buffer_evicts_oldest_and_counts_drop);
     RUN_TEST(test_consumed_prefix_is_compacted_past_threshold);
     RUN_TEST(test_drop_after_eviction_keeps_the_unsent_record);
+    RUN_TEST(test_emitted_loss_between_peek_and_drop_does_not_block_the_drop);
     RUN_TEST(test_lock_timeout_rejects_operations_without_side_effects);
+    RUN_TEST(test_used_percent_returns_last_known_value_on_lock_timeout);
     RUN_TEST(test_concurrent_append_and_drain_serialize);
     return UNITY_END();
 }

@@ -59,6 +59,7 @@ public:
     uint8_t usedPercent() const override;
     uint32_t pendingCount() const override;
     uint32_t droppedCount() const override;
+    void recordEmittedLoss() override;
     const char *kind() const override;
 
 private:
@@ -67,6 +68,13 @@ private:
 
     /** Drops leading records until the file fits under MAX_BYTES. */
     void makeRoom(size_t incomingLength);
+
+    /**
+     * @brief Logs a lock timeout distinctly from a genuinely full/empty
+     *        buffer, so an operator reading serial output does not mistake
+     *        contention for capacity.
+     */
+    void logLockTimeout(const char *operation) const;
 
     /** dropOldest() without the lock or the peek-token check. */
     bool dropOldestLocked();
@@ -82,10 +90,22 @@ private:
 
     // Atomic so meta telemetry can read them from the other core lock-free.
     std::atomic<uint32_t> _pending{0};
-    std::atomic<uint32_t> _dropped{0};
+
+    // Two separate counters, summed by droppedCount() for meta.store.drop:
+    // _evicted (makeRoom() reclaiming space) drives the peek token, so a
+    // recordEmittedLoss() between peek() and dropOldest() can never be
+    // mistaken for an eviction of the record that was just peeked.
+    std::atomic<uint32_t> _evicted{0};
+    std::atomic<uint32_t> _emittedLoss{0};
     std::atomic<bool> _mounted{false};
 
-    // Eviction count at the last peek; a mismatch means the peeked record is gone.
+    // Cached so a lock timeout in usedPercent() can report the last known
+    // capacity instead of misreporting contention as an empty buffer.
+    // mutable: written from usedPercent(), which is otherwise a pure read.
+    mutable std::atomic<uint8_t> _lastUsedPercent{0};
+
+    // _evicted at the last peek; a mismatch means the peeked record was
+    // evicted (not just accounted as an emitted loss elsewhere).
     uint32_t _peekToken = 0;
     bool _hasPeekToken = false;
 };

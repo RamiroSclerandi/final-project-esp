@@ -7,6 +7,7 @@
 #include "core/ProvisioningTimeout.h"
 #include "core/SamplingDelay.h"
 #include "core/TransmitSchedule.h"
+#include "core/WatchdogConfig.h"
 #include "transport/MqttTimeouts.h"
 
 namespace
@@ -119,9 +120,80 @@ void test_provisioning_timed_out_once_the_input_timeout_elapses(void)
     TEST_ASSERT_TRUE(ProvisioningTimeout::hasTimedOut(ProvisioningTimeout::INPUT_TIMEOUT_MS, 0));
 }
 
+void test_activity_timeout_not_elapsed_before_the_input_timeout(void)
+{
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+    TEST_ASSERT_FALSE(timeout.hasTimedOut(ProvisioningTimeout::INPUT_TIMEOUT_MS - 1));
+}
+
+void test_activity_timeout_elapses_with_no_activity(void)
+{
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+    TEST_ASSERT_TRUE(timeout.hasTimedOut(ProvisioningTimeout::INPUT_TIMEOUT_MS));
+}
+
+void test_activity_resets_the_timeout_window(void)
+{
+    // readNumber's bug: an operator typing one digit every ~55 s never times
+    // out mid-entry, because each keystroke is activity — only silence for
+    // the full INPUT_TIMEOUT_MS should cut the wait short.
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+
+    const uint32_t keystroke = ProvisioningTimeout::INPUT_TIMEOUT_MS - 1000;
+    timeout.noteActivity(keystroke);
+
+    // Elapsed since the ORIGINAL start now exceeds INPUT_TIMEOUT_MS, but
+    // only 999 ms have passed since the keystroke: must not be timed out.
+    TEST_ASSERT_FALSE(timeout.hasTimedOut(keystroke + 999));
+
+    // Now a full INPUT_TIMEOUT_MS of silence has elapsed since that keystroke.
+    TEST_ASSERT_TRUE(timeout.hasTimedOut(keystroke + ProvisioningTimeout::INPUT_TIMEOUT_MS));
+}
+
+void test_accepted_input_char_matches_digits_and_terminators(void)
+{
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedInputChar('0'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedInputChar('9'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedInputChar('\r'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedInputChar('\n'));
+}
+
+void test_accepted_input_char_rejects_noise_bytes(void)
+{
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedInputChar('a'));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedInputChar(' '));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedInputChar(0x07));
+}
+
+void test_activity_timeout_hard_cap_wins_despite_recent_activity(void)
+{
+    // Continuous accepted input (e.g. a digit flood) must not be able to
+    // keep readNumber() waiting forever: HARD_CAP_MS bounds the whole call
+    // regardless of how recently activity was seen.
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+
+    const uint32_t justBeforeCap = ProvisioningTimeout::HARD_CAP_MS - 1;
+    timeout.noteActivity(justBeforeCap);
+
+    // Only 1 ms of silence since the last keystroke: not timed out on that
+    // basis alone, but HARD_CAP_MS has now elapsed since the call started.
+    TEST_ASSERT_FALSE(timeout.hasTimedOut(justBeforeCap));
+    TEST_ASSERT_TRUE(timeout.hasTimedOut(ProvisioningTimeout::HARD_CAP_MS));
+}
+
 void test_mqtt_timeouts_match_the_verified_seconds_values(void)
 {
     // Verified against the pinned Arduino-ESP32 2.0.17 WiFiClientSecure source:
+    // WiFiClientSecure::setTimeout(uint32_t seconds) bounds the raw TCP
+    // connect() phase (WiFiClientSecure.cpp:378-389, `_timeout = seconds *
+    // 1000`); without it the constructor's default `_timeout = 30000`
+    // (WiFiClientSecure.cpp:35) applies for the full 30 s, and that value
+    // reaches lwip_connect()'s select() timeout unchanged
+    // (ssl_client.cpp:84-95). PubSubClient::connect() calls the 2-arg
+    // connect(host, port) overload that reads `_timeout`
+    // (.pio/libdeps/esp32dev/PubSubClient/src/PubSubClient.cpp:190).
+    TEST_ASSERT_EQUAL_UINT32(5, MqttTimeouts::TCP_CONNECT_TIMEOUT_S);
+
     // setHandshakeTimeout(unsigned long) takes SECONDS, not ms
     // (framework-arduinoespressif32/libraries/WiFiClientSecure/src/
     // WiFiClientSecure.cpp:369-372 multiplies the argument by 1000 itself).
@@ -136,13 +208,14 @@ void test_mqtt_timeouts_match_the_verified_seconds_values(void)
 
 void test_mqtt_timeout_budget_stays_well_under_the_task_watchdog(void)
 {
-    // 30 s WDT (main.cpp WDT_TIMEOUT_S); one poll must not eat the whole
-    // budget or a single slow connect attempt panics the board.
-    constexpr uint32_t WDT_TIMEOUT_S = 30;
-    const uint32_t pollBudgetS =
-        MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S + MqttTimeouts::SOCKET_TIMEOUT_S;
+    // One connect attempt must not eat the whole WDT budget: TCP connect +
+    // TLS handshake + socket write, or a single slow/unreachable broker
+    // panics the board.
+    const uint32_t pollBudgetS = MqttTimeouts::TCP_CONNECT_TIMEOUT_S +
+                                 MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S +
+                                 MqttTimeouts::SOCKET_TIMEOUT_S;
 
-    TEST_ASSERT_LESS_THAN_UINT32(WDT_TIMEOUT_S, pollBudgetS);
+    TEST_ASSERT_LESS_THAN_UINT32(WatchdogConfig::TIMEOUT_S, pollBudgetS);
 }
 
 int main(void)
@@ -162,6 +235,12 @@ int main(void)
     RUN_TEST(test_first_send_proceeds_after_sync_timeout);
     RUN_TEST(test_provisioning_not_timed_out_before_the_input_timeout);
     RUN_TEST(test_provisioning_timed_out_once_the_input_timeout_elapses);
+    RUN_TEST(test_activity_timeout_not_elapsed_before_the_input_timeout);
+    RUN_TEST(test_activity_timeout_elapses_with_no_activity);
+    RUN_TEST(test_activity_resets_the_timeout_window);
+    RUN_TEST(test_accepted_input_char_matches_digits_and_terminators);
+    RUN_TEST(test_accepted_input_char_rejects_noise_bytes);
+    RUN_TEST(test_activity_timeout_hard_cap_wins_despite_recent_activity);
     RUN_TEST(test_mqtt_timeouts_match_the_verified_seconds_values);
     RUN_TEST(test_mqtt_timeout_budget_stays_well_under_the_task_watchdog);
     return UNITY_END();
