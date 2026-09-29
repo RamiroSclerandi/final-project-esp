@@ -13,7 +13,9 @@ class FakeSensor : public ISensor
 {
 public:
     FakeSensor(const char *name, Measurement *channels, uint8_t count)
-        : _name(name), _channels(channels), _count(count) {}
+        : _name(name), _channels(channels), _count(count)
+    {
+    }
 
     bool begin() override { return true; }
     bool read() override { return true; }

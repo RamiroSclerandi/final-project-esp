@@ -42,7 +42,7 @@ namespace
 
     /** One sensor, two channels: a working one and a normally-failing one. */
     void buildTwoChannelAccumulator(SensorRegistry &registry, FakeSensor &sensor,
-                                     Measurement (&channels)[2], MeasurementAccumulator &accumulator)
+                                    Measurement (&channels)[2], MeasurementAccumulator &accumulator)
     {
         channels[0] = {Channel::TEMPERATURE, Tag::NONE, Unit::CELSIUS, 0.0f, true};
         channels[1] = {Channel::PRESSURE, Tag::NONE, Unit::HECTOPASCAL, 0.0f, true};
