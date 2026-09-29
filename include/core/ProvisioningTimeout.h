@@ -69,4 +69,29 @@ namespace ProvisioningTimeout
         uint32_t _startMs;
         uint32_t _lastActivityMs;
     };
+
+    /** Outcome of one readNumber() wait-loop iteration decision. */
+    enum class ReadWaitStep
+    {
+        TimedOut, ///< Stop and return the fallback.
+        HasByte,  ///< A byte is available and should be consumed now.
+        Idle,     ///< Nothing available yet and not timed out: sleep and retry.
+    };
+
+    /**
+     * @brief Decides readNumber()'s next action for one wait-loop iteration.
+     *
+     * The timeout is evaluated unconditionally, before whether a byte is
+     * available — a continuous stream of bytes must not be able to skip the
+     * check every iteration and defeat HARD_CAP_MS.
+     */
+    inline ReadWaitStep nextReadWaitStep(const ActivityTimeout &timeout, uint32_t nowMs,
+                                         bool byteAvailable)
+    {
+        if (timeout.hasTimedOut(nowMs))
+        {
+            return ReadWaitStep::TimedOut;
+        }
+        return byteAvailable ? ReadWaitStep::HasByte : ReadWaitStep::Idle;
+    }
 }

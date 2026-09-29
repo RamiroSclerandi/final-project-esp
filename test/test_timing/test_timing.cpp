@@ -181,6 +181,34 @@ void test_activity_timeout_hard_cap_wins_despite_recent_activity(void)
     TEST_ASSERT_TRUE(timeout.hasTimedOut(ProvisioningTimeout::HARD_CAP_MS));
 }
 
+void test_read_wait_step_cap_fires_under_a_continuous_byte_stream(void)
+{
+    // Simulates readNumber()'s wait loop fed an uninterrupted flood of
+    // accepted bytes (byteAvailable=true on every single iteration, each
+    // one restarting the activity window): the old wiring only evaluated
+    // the timeout when no byte was available, so a continuous stream could
+    // never trip HARD_CAP_MS. The step decision must check it regardless.
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+
+    for (uint32_t nowMs = 0; nowMs < ProvisioningTimeout::HARD_CAP_MS; nowMs += 1000)
+    {
+        timeout.noteActivity(nowMs);
+        TEST_ASSERT_EQUAL(ProvisioningTimeout::ReadWaitStep::HasByte,
+                          ProvisioningTimeout::nextReadWaitStep(timeout, nowMs, true));
+    }
+
+    TEST_ASSERT_EQUAL(
+        ProvisioningTimeout::ReadWaitStep::TimedOut,
+        ProvisioningTimeout::nextReadWaitStep(timeout, ProvisioningTimeout::HARD_CAP_MS, true));
+}
+
+void test_read_wait_step_is_idle_when_no_byte_and_not_timed_out(void)
+{
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+    TEST_ASSERT_EQUAL(ProvisioningTimeout::ReadWaitStep::Idle,
+                      ProvisioningTimeout::nextReadWaitStep(timeout, 100, false));
+}
+
 void test_mqtt_timeouts_match_the_verified_seconds_values(void)
 {
     // Verified against the pinned Arduino-ESP32 2.0.17 WiFiClientSecure source:
@@ -241,6 +269,8 @@ int main(void)
     RUN_TEST(test_accepted_input_char_matches_digits_and_terminators);
     RUN_TEST(test_accepted_input_char_rejects_noise_bytes);
     RUN_TEST(test_activity_timeout_hard_cap_wins_despite_recent_activity);
+    RUN_TEST(test_read_wait_step_cap_fires_under_a_continuous_byte_stream);
+    RUN_TEST(test_read_wait_step_is_idle_when_no_byte_and_not_timed_out);
     RUN_TEST(test_mqtt_timeouts_match_the_verified_seconds_values);
     RUN_TEST(test_mqtt_timeout_budget_stays_well_under_the_task_watchdog);
     return UNITY_END();
