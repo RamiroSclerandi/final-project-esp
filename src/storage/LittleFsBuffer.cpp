@@ -279,7 +279,21 @@ bool LittleFsBuffer::dropOldest()
 
     const bool isPeekedRecordEvicted = _hasPeekToken && _peekToken != _evicted;
     _hasPeekToken = false;
-    return !isPeekedRecordEvicted && dropOldestLocked();
+
+    if (isPeekedRecordEvicted)
+    {
+        // makeRoom() already counted this exact record as an eviction before
+        // it could know the send in flight would still succeed. dropOldest()
+        // is only ever called after a confirmed send (ILocalBuffer
+        // contract), so the record was actually delivered, not lost: undo
+        // that premature count so it never inflates meta.store.drop without
+        // a matching seq gap (G-10). It cannot be re-dropped here — makeRoom()
+        // already advanced past it.
+        _evicted--;
+        return false;
+    }
+
+    return dropOldestLocked();
 }
 
 bool LittleFsBuffer::dropOldestLocked()

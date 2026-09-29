@@ -218,6 +218,37 @@ void test_drop_after_eviction_keeps_the_unsent_record(void)
 
     TEST_ASSERT_EQUAL_STRING("0001", peekText(buffer, 5).c_str());
     TEST_ASSERT_EQUAL_UINT32(RECORDS_THAT_FIT, buffer.pendingCount());
+
+    // dropOldest() is only ever called after a confirmed send (ILocalBuffer
+    // contract), so record 0 WAS delivered even though makeRoom() evicted it
+    // first. That must not inflate meta.store.drop without a matching seq
+    // gap (G-10): droppedCount() must be back to what it was before record 0
+    // was ever evicted.
+    TEST_ASSERT_EQUAL_UINT32(0, buffer.droppedCount());
+}
+
+void test_drop_after_eviction_of_multiple_records_undoes_only_the_peeked_one(void)
+{
+    LittleFsBuffer buffer;
+    buffer.begin();
+    for (int index = 0; index < RECORDS_THAT_FIT; index++)
+    {
+        TEST_ASSERT_TRUE(appendIndexedRecord(buffer, index));
+    }
+    TEST_ASSERT_EQUAL_STRING("0000", peekText(buffer, 5).c_str());
+
+    // Double-sized incoming record forces two evictions in one append:
+    // record 0 (peeked, about to be confirmed delivered below) and record 1
+    // (never peeked — a genuine, still-uncounted loss).
+    std::string big(RECORD_BYTES * 2, 'y');
+    big.replace(0, 4, indexText(RECORDS_THAT_FIT));
+    TEST_ASSERT_TRUE(buffer.append((const uint8_t *)big.data(), big.size()));
+
+    TEST_ASSERT_FALSE(buffer.dropOldest());
+
+    // Only record 0's eviction is undone; record 1's genuine loss still
+    // counts, so droppedCount() must be 1, not 0 and not 2.
+    TEST_ASSERT_EQUAL_UINT32(1, buffer.droppedCount());
 }
 
 void test_emitted_loss_between_peek_and_drop_does_not_block_the_drop(void)
@@ -322,6 +353,7 @@ int main(void)
     RUN_TEST(test_full_buffer_evicts_oldest_and_counts_drop);
     RUN_TEST(test_consumed_prefix_is_compacted_past_threshold);
     RUN_TEST(test_drop_after_eviction_keeps_the_unsent_record);
+    RUN_TEST(test_drop_after_eviction_of_multiple_records_undoes_only_the_peeked_one);
     RUN_TEST(test_emitted_loss_between_peek_and_drop_does_not_block_the_drop);
     RUN_TEST(test_lock_timeout_rejects_operations_without_side_effects);
     RUN_TEST(test_used_percent_returns_last_known_value_on_lock_timeout);
