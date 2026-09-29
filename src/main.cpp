@@ -9,7 +9,14 @@
 #include "config/DeviceConfig.h"
 #include "config/Provisioning.h"
 #include "core/DeviceInfo.h"
+#include "core/EmissionLedger.h"
+#include "core/EmissionOutcome.h"
 #include "core/MeasurementAccumulator.h"
+#include "core/ModbusAvailability.h"
+#include "core/ModbusBuildFlag.h"
+#include "core/SamplingDelay.h"
+#include "core/TransmitSchedule.h"
+#include "core/WatchdogConfig.h"
 #include "codec/JsonCodec.h"
 #include "sensors/SensorRegistry.h"
 #include "sensors/BMP280Sensor.h"
@@ -34,12 +41,6 @@
 #define MODBUS_BAUD_RATE 9600
 #endif
 
-// Must comfortably exceed the longest legitimate blocking operation, which is
-// the WiFi association plus the TLS handshake (5-15 s in the worst case). A
-// watchdog that fires on a healthy system is worse than none: it produces a
-// reboot loop that looks exactly like the fault it was meant to catch.
-static constexpr uint32_t WDT_TIMEOUT_S = 30;
-
 // Last resort for a link that never recovers. Only safe now that unsent
 // readings are persisted locally: without the buffer, a restart would discard
 // everything still queued in RAM.
@@ -60,8 +61,10 @@ struct SensorReading
 // ---------------------------------------------------------------------------
 static BMP280Sensor bmpSensor(Wire, 0x76);
 static DHT22Sensor dhtSensor(DHT_DATA_PIN);
+#if DL_ENABLE_MODBUS
 static ModbusEnergyMeter energyMeter(Serial2, RS485_DE_PIN,
                                      MODBUS_SLAVE_ID, MODBUS_BAUD_RATE);
+#endif
 
 static SensorRegistry registry;
 static MeasurementAccumulator accumulator;
@@ -83,24 +86,31 @@ static ITransport *transport = nullptr;
 static QueueHandle_t dataQueue;
 static std::atomic<uint32_t> samplingInterval;
 static std::atomic<uint32_t> transmitInterval;
-static std::atomic<uint32_t> sequenceCounter;
 static uint32_t bootCount = 0;
 
-// Reported once, on the first message after a restart.
-static const char *pendingResetReason = nullptr;
+// Owns seq/meta.lost/pendingResetReason (G-10). Single writer (sensorTask),
+// so it needs no synchronization — see include/core/EmissionLedger.h.
+static EmissionLedger emissionLedger;
 
 // ---------------------------------------------------------------------------
 // Fills the node telemetry that travels alongside the readings.
+//
+// Reads the ledger without consuming it: seq/pendingResetReason are only
+// advanced/cleared by emissionLedger.recordSendAttempt(), once this reading
+// is actually handed to transport/buffer (G-10). A payload that never gets
+// that far (encode failure, oversize, queue-full-and-buffer-fail) is
+// discarded before its meta is ever used, so seq stays gap-free and the
+// reset reason is still reported on the next attempt.
 // ---------------------------------------------------------------------------
 static PayloadMeta buildMeta()
 {
     PayloadMeta meta;
     meta.rssi = transport != nullptr ? transport->linkQuality() : 0;
-    meta.sequence = sequenceCounter.fetch_add(1);
+    meta.sequence = emissionLedger.sequence();
     meta.bootCount = bootCount;
+    meta.lostCount = emissionLedger.lostCount();
 
-    meta.resetReason = pendingResetReason;
-    pendingResetReason = nullptr;
+    meta.resetReason = emissionLedger.pendingResetReason();
 
     meta.storeKind = localBuffer.kind();
     meta.storeUsedPct = localBuffer.usedPercent();
@@ -108,6 +118,33 @@ static PayloadMeta buildMeta()
     meta.storeDropped = localBuffer.droppedCount();
 
     return meta;
+}
+
+// ---------------------------------------------------------------------------
+// Sleeps one sampling interval in watchdog-sized chunks. The interval is
+// re-read per chunk so a remote change applies within the current wait.
+//
+// While the first send is still pending, the wait is capped to the first-send
+// timeout: otherwise a long samplingInterval would delay it well past that
+// timeout, since the transmit gate is only re-checked once the wait returns.
+// ---------------------------------------------------------------------------
+static void waitForNextSample(bool firstSendPending)
+{
+    const uint32_t waitStart = millis();
+    while (true)
+    {
+        esp_task_wdt_reset();
+        const uint32_t effectiveInterval =
+            SamplingDelay::effectiveIntervalMs(samplingInterval.load(), firstSendPending,
+                                               TransmitSchedule::FIRST_SEND_SYNC_TIMEOUT_MS);
+        const uint32_t chunk = SamplingDelay::nextChunkMs(millis() - waitStart, effectiveInterval,
+                                                          SamplingDelay::WDT_SLICE_MS);
+        if (chunk == 0)
+        {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(chunk));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +161,8 @@ static void sensorTask(void *pvParameters)
     esp_task_wdt_add(nullptr);
 
     accumulator.reset(registry);
-    uint32_t lastTransmit = millis();
+    const uint32_t taskStart = millis();
+    uint32_t lastTransmit = taskStart;
     bool first = true;
 
     while (true)
@@ -135,7 +173,12 @@ static void sensorTask(void *pvParameters)
         accumulator.accumulate(registry);
 
         const uint32_t now = millis();
-        if (first || (now - lastTransmit >= transmitInterval.load()))
+        const bool isDue =
+            first
+                ? TransmitSchedule::isFirstSendAllowed(DeviceInfo::isClockSynced(), now, taskStart)
+                : TransmitSchedule::isDue(now, lastTransmit, transmitInterval.load(),
+                                          samplingInterval.load());
+        if (isDue)
         {
             first = false;
             lastTransmit = now;
@@ -151,33 +194,57 @@ static void sensorTask(void *pvParameters)
             // encode cannot let stale samples leak into the next message.
             accumulator.reset(registry);
 
+            EmissionOutcome::SendAttempt attempt;
             if (written == 0)
             {
-                Serial.println("[Sensor] El payload no entra en el buffer — descartado.");
+                attempt = EmissionOutcome::SendAttempt::EncodeFailed;
             }
             else if (transport != nullptr && written > transport->maxPayloadSize())
             {
+                attempt = EmissionOutcome::SendAttempt::OversizeForTransport;
+            }
+            else if (xQueueSend(dataQueue, &reading, pdMS_TO_TICKS(100)) == pdTRUE)
+            {
+                attempt = EmissionOutcome::SendAttempt::QueuedOk;
+            }
+            else if (localBuffer.append((const uint8_t *)reading.payload, written))
+            {
+                attempt = EmissionOutcome::SendAttempt::BufferedOk;
+            }
+            else
+            {
+                attempt = EmissionOutcome::SendAttempt::QueueFullAndBufferFailed;
+            }
+
+            // seq/pendingResetReason advance only on an actual emission;
+            // anything else is a pre-emission device-side loss (meta.lost).
+            emissionLedger.recordSendAttempt(attempt);
+
+            switch (attempt)
+            {
+            case EmissionOutcome::SendAttempt::EncodeFailed:
+                Serial.println("[Sensor] El payload no entra en el buffer — descartado.");
+                break;
+            case EmissionOutcome::SendAttempt::OversizeForTransport:
                 Serial.printf("[Sensor] Payload de %u B supera el limite de %s (%u B).\n",
                               (unsigned)written, transport->name(),
                               (unsigned)transport->maxPayloadSize());
-            }
-            else if (xQueueSend(dataQueue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
-            {
-                // The link is down and the in-RAM queue is full. Persisting here
-                // is what keeps the reading instead of dropping it.
-                if (localBuffer.append((const uint8_t *)reading.payload, written))
-                {
-                    Serial.printf("[Sensor] Cola llena — guardado local (%lu pendientes).\n",
-                                  (unsigned long)localBuffer.pendingCount());
-                }
-                else
-                {
-                    Serial.println("[Sensor] Cola llena y sin respaldo — lectura PERDIDA.");
-                }
+                break;
+            case EmissionOutcome::SendAttempt::BufferedOk:
+                // The link is down and the in-RAM queue is full; persisting
+                // here is what keeps the reading instead of dropping it.
+                Serial.printf("[Sensor] Cola llena — guardado local (%lu pendientes).\n",
+                              (unsigned long)localBuffer.pendingCount());
+                break;
+            case EmissionOutcome::SendAttempt::QueueFullAndBufferFailed:
+                Serial.println("[Sensor] Cola llena y sin respaldo — lectura PERDIDA.");
+                break;
+            case EmissionOutcome::SendAttempt::QueuedOk:
+                break;
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(samplingInterval.load()));
+        waitForNextSample(first);
     }
 }
 
@@ -232,6 +299,12 @@ static void networkTask(void *pvParameters)
             }
             else if (!localBuffer.append((const uint8_t *)reading.payload, length))
             {
+                // Post-emission double failure: seq was already stamped for
+                // this reading, so this shows up downstream as a seq gap.
+                // The loss itself belongs in meta.store.drop, not meta.lost
+                // — the record is gone from local storage the same way an
+                // eviction is, not a pre-emission device drop (G-10).
+                localBuffer.recordEmittedLoss();
                 Serial.printf("[%s] Envio fallido y sin respaldo — PERDIDO.\n",
                               transport->name());
             }
@@ -269,10 +342,22 @@ static void registerConfiguredSensors()
         registry.add(&dhtSensor);
     }
 
+#if DL_ENABLE_MODBUS
     if (deviceConfig.isSensorEnabled(SensorKey::MODBUS_METER))
     {
         registry.add(&energyMeter);
     }
+#else
+    // The NVS flag is left untouched here — only visibility changes. Without
+    // this, a device provisioned with the meter enabled silently reports no
+    // Modbus channels, with nothing on serial to explain why.
+    if (ModbusAvailability::isConfiguredButExcluded(
+            false, deviceConfig.isSensorEnabled(SensorKey::MODBUS_METER)))
+    {
+        Serial.println("[WARNING] Medidor Modbus configurado pero excluido de este build "
+                       "(DL_ENABLE_MODBUS=0) — sin datos de Modbus.");
+    }
+#endif
 
     if (registry.sensorCount() == 0)
     {
@@ -324,12 +409,13 @@ void setup()
     Serial.begin(115200);
     delay(500);
 
-    pendingResetReason = DeviceInfo::resetReason();
+    const char *resetReason = DeviceInfo::resetReason();
+    emissionLedger.reset(resetReason);
 
     Serial.println("\n========================================");
     Serial.println(" Datalogger ESP32 — Booting");
     Serial.printf(" Device ID: %s\n", DeviceInfo::deviceId());
-    Serial.printf(" Reinicio previo: %s\n", pendingResetReason);
+    Serial.printf(" Reinicio previo: %s\n", resetReason);
     Serial.println("========================================");
 
     // 1. Restore configuration and run the setup menu if needed
@@ -348,7 +434,6 @@ void setup()
 
     samplingInterval.store(deviceConfig.samplingIntervalMs());
     transmitInterval.store(deviceConfig.transmitIntervalMs());
-    sequenceCounter.store(0);
     bootCount = deviceConfig.nextBootCount();
     Serial.printf("[Config] Arranque numero %lu\n", (unsigned long)bootCount);
 
@@ -394,7 +479,7 @@ void setup()
     }
 
     // 9. Watchdog, armed before the tasks it supervises exist
-    esp_task_wdt_init(WDT_TIMEOUT_S, true); // true = panic and reboot on timeout
+    esp_task_wdt_init(WatchdogConfig::TIMEOUT_S, true); // true = panic and reboot on timeout
 
     // 10. Spawn FreeRTOS tasks
     xTaskCreatePinnedToCore(sensorTask, "SensorTask", 8192, nullptr, 1, nullptr, 0);

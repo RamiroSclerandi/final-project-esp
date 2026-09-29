@@ -1,6 +1,8 @@
 #include "MQTTManager.h"
 
+#include "core/ConfigLimits.h"
 #include "core/DeviceInfo.h"
+#include "transport/MqttTimeouts.h"
 
 #include <WiFi.h>
 #include <Arduino.h>
@@ -126,6 +128,11 @@ MQTTManager::MQTTManager(const char *caCert)
     _mqttClient.setCallback(_onMessageStatic);
     _mqttClient.setBufferSize(1024); // Fits the datalogger.v1 payload plus header
     _mqttClient.setKeepAlive(60);
+    _mqttClient.setSocketTimeout(MqttTimeouts::SOCKET_TIMEOUT_S);
+    _wifiClient.setHandshakeTimeout(MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S);
+    // Bounds the raw TCP connect() phase, which otherwise defaults to 30 s
+    // (WiFiClientSecure's own constructor default) — see MqttTimeouts.h.
+    _wifiClient.setTimeout(MqttTimeouts::TCP_CONNECT_TIMEOUT_S);
 }
 
 void MQTTManager::configure(const char *host, uint16_t port,
@@ -368,8 +375,7 @@ void MQTTManager::_onMessage(char *topic, byte *payload, unsigned int length)
     {
         int newInterval = doc["samplingInterval"].as<int>();
 
-        // Sanity check: accept values between 1 second and 5 minutes.
-        if (newInterval >= 1000 && newInterval <= 300000)
+        if (ConfigLimits::isValidSamplingIntervalMs((uint32_t)newInterval))
         {
             Serial.printf("[MQTT] Config remota — samplingInterval: %d ms\n",
                           newInterval);

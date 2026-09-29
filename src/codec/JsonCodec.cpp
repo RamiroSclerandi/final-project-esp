@@ -25,6 +25,13 @@ size_t JsonCodec::encode(const MeasurementAccumulator &readings,
     // sessions, which also makes unexpected reboots visible to the server.
     metaObj["boot"] = meta.bootCount;
 
+    // Always emitted, including 0: the server cannot tell "no loss" from
+    // "field absent" otherwise. Pre-emission only (seq was never assigned to
+    // these), so it never explains a seq gap by itself — meta.store.drop is
+    // the field to subtract from a gap to isolate true transport/broker loss
+    // (G-10).
+    metaObj["lost"] = meta.lostCount;
+
     // Lets the server flag readings whose timestamp is the arrival time rather
     // than the acquisition time, which are lower-quality data points.
     metaObj["ts_src"] = DeviceInfo::isClockSynced() ? "device" : "server";
@@ -44,6 +51,11 @@ size_t JsonCodec::encode(const MeasurementAccumulator &readings,
         store["k"] = meta.storeKind;
         store["pct"] = meta.storeUsedPct;
         store["pend"] = meta.storePending;
+
+        // Post-emission loss (seq already assigned): eviction under space
+        // pressure, or networkTask's send-then-reappend double failure. Both
+        // open a seq gap, so subtracting this from a gap isolates true
+        // transport/broker loss (G-10) — meta.lost never contributes here.
         store["drop"] = meta.storeDropped;
     }
 

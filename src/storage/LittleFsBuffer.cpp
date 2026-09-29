@@ -8,9 +8,68 @@ namespace
     constexpr char RECORDS_PATH[] = "/buffer.jsonl";
     constexpr char OFFSET_PATH[] = "/buffer.off";
     constexpr char TEMP_PATH[] = "/buffer.tmp";
+
+    /** Holds the buffer mutex for one scope; isHeld() is false after a timeout. */
+    class ScopedLock
+    {
+    public:
+        explicit ScopedLock(SemaphoreHandle_t mutex)
+            : _mutex(mutex),
+              _isHeld(mutex != nullptr &&
+                      xSemaphoreTake(mutex, pdMS_TO_TICKS(LittleFsBuffer::LOCK_TIMEOUT_MS)) ==
+                          pdTRUE)
+        {
+        }
+
+        ~ScopedLock()
+        {
+            if (_isHeld)
+            {
+                xSemaphoreGive(_mutex);
+            }
+        }
+
+        ScopedLock(const ScopedLock &) = delete;
+        ScopedLock &operator=(const ScopedLock &) = delete;
+
+        bool isHeld() const { return _isHeld; }
+
+    private:
+        SemaphoreHandle_t _mutex;
+        bool _isHeld;
+    };
+}
+
+LittleFsBuffer::~LittleFsBuffer()
+{
+    if (_mutex != nullptr)
+    {
+        vSemaphoreDelete(_mutex);
+    }
 }
 
 bool LittleFsBuffer::begin()
+{
+    if (_mutex == nullptr)
+    {
+        _mutex = xSemaphoreCreateMutex();
+    }
+
+    // Scoped: usedPercent() below takes the non-recursive lock itself.
+    {
+        ScopedLock lock(_mutex);
+        if (!lock.isHeld() || !mount())
+        {
+            return false;
+        }
+    }
+
+    Serial.printf("[Buffer] LittleFS montado. %lu registros pendientes, %u%% usado.\n",
+                  (unsigned long)_pending, usedPercent());
+    return true;
+}
+
+bool LittleFsBuffer::mount()
 {
     // true = format if the partition is not mountable. A corrupted buffer is
     // worth losing; an unusable filesystem would disable persistence entirely.
@@ -32,9 +91,6 @@ bool LittleFsBuffer::begin()
     }
 
     recountPending();
-
-    Serial.printf("[Buffer] LittleFS montado. %lu registros pendientes, %u%% usado.\n",
-                  (unsigned long)_pending, usedPercent());
     return true;
 }
 
@@ -98,11 +154,11 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
     while (hasPending())
     {
         const size_t before = _readOffset;
-        if (!dropOldest())
+        if (!dropOldestLocked())
         {
             break;
         }
-        _dropped++;
+        _evicted++;
 
         if (_readOffset == before)
         {
@@ -125,11 +181,28 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
 
     compact();
     Serial.printf("[Buffer] Almacenamiento lleno. Total descartados: %lu\n",
-                  (unsigned long)_dropped);
+                  (unsigned long)droppedCount());
+}
+
+void LittleFsBuffer::logLockTimeout(const char *operation) const
+{
+    // Only a real contention timeout, not the "never began" case (mutex
+    // still null): that one is an ordinary early-boot condition, not
+    // something worth alarming an operator about.
+    if (_mutex != nullptr)
+    {
+        Serial.printf("[Buffer] Lock ocupado (%s) — no es almacenamiento lleno.\n", operation);
+    }
 }
 
 bool LittleFsBuffer::append(const uint8_t *payload, size_t length)
 {
+    ScopedLock lock(_mutex);
+    if (!lock.isHeld())
+    {
+        logLockTimeout("append");
+        return false;
+    }
     if (!_mounted || length == 0)
     {
         return false;
@@ -163,7 +236,8 @@ bool LittleFsBuffer::hasPending() const
 
 size_t LittleFsBuffer::peekOldest(uint8_t *out, size_t outSize)
 {
-    if (!hasPending())
+    ScopedLock lock(_mutex);
+    if (!lock.isHeld() || !hasPending())
     {
         return 0;
     }
@@ -189,10 +263,26 @@ size_t LittleFsBuffer::peekOldest(uint8_t *out, size_t outSize)
 
     file.close();
     out[length] = '\0';
+
+    _peekToken = _evicted;
+    _hasPeekToken = true;
     return length;
 }
 
 bool LittleFsBuffer::dropOldest()
+{
+    ScopedLock lock(_mutex);
+    if (!lock.isHeld())
+    {
+        return false;
+    }
+
+    const bool isPeekedRecordEvicted = _hasPeekToken && _peekToken != _evicted;
+    _hasPeekToken = false;
+    return !isPeekedRecordEvicted && dropOldestLocked();
+}
+
+bool LittleFsBuffer::dropOldestLocked()
 {
     if (!hasPending())
     {
@@ -281,6 +371,14 @@ bool LittleFsBuffer::compact()
 
 uint8_t LittleFsBuffer::usedPercent() const
 {
+    ScopedLock lock(_mutex);
+    if (!lock.isHeld())
+    {
+        // A timeout is contention, not "nothing stored" — the last known
+        // value is a far better answer than a misleading 0.
+        logLockTimeout("usedPercent");
+        return _lastUsedPercent.load();
+    }
     if (!_mounted)
     {
         return 0;
@@ -297,7 +395,9 @@ uint8_t LittleFsBuffer::usedPercent() const
 
     const size_t live = size > _readOffset ? size - _readOffset : 0;
     const uint32_t percent = (uint32_t)((live * 100) / MAX_BYTES);
-    return percent > 100 ? 100 : (uint8_t)percent;
+    const uint8_t result = percent > 100 ? 100 : (uint8_t)percent;
+    _lastUsedPercent.store(result);
+    return result;
 }
 
 uint32_t LittleFsBuffer::pendingCount() const
@@ -307,7 +407,16 @@ uint32_t LittleFsBuffer::pendingCount() const
 
 uint32_t LittleFsBuffer::droppedCount() const
 {
-    return _dropped;
+    return _evicted + _emittedLoss;
+}
+
+void LittleFsBuffer::recordEmittedLoss()
+{
+    // No lock needed: _emittedLoss is atomic and this never touches the
+    // filesystem. Kept separate from _evicted (see ILocalBuffer::
+    // recordEmittedLoss doc for why this loss belongs in the same reported
+    // total) so it never perturbs the peek token: droppedCount() sums both.
+    _emittedLoss++;
 }
 
 const char *LittleFsBuffer::kind() const

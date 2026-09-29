@@ -1,5 +1,7 @@
 #include "config/DeviceConfig.h"
 
+#include "core/ConfigLimits.h"
+
 #include <Arduino.h>
 
 namespace
@@ -93,7 +95,10 @@ void DeviceConfig::setSensorEnabled(const char *sensorKey, bool enabled)
 
 uint32_t DeviceConfig::samplingIntervalMs() const
 {
-    return _prefs.getUInt(KEY_SAMPLING, DEFAULT_SAMPLING_MS);
+    // Repairs a value stored before ConfigLimits existed (or written by an
+    // older firmware), instead of leaving a bad value in force forever
+    // because only writes were validated, not loads.
+    return ConfigLimits::clampSamplingIntervalMs(_prefs.getUInt(KEY_SAMPLING, DEFAULT_SAMPLING_MS));
 }
 
 void DeviceConfig::setSamplingIntervalMs(uint32_t ms)

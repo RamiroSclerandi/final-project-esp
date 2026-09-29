@@ -43,12 +43,27 @@ public:
     virtual uint32_t pendingCount() const = 0;
 
     /**
-     * @return Records discarded because the store filled up.
+     * @return Records discarded from local storage: evicted because the
+     *         store filled up, or lost after networkTask's send failed and
+     *         its own re-append also failed (see recordEmittedLoss()).
      *
      * A datalogger keeps recent data over old data, but the loss must be
      * visible and counted rather than silent.
      */
     virtual uint32_t droppedCount() const = 0;
+
+    /**
+     * @brief Counts a record whose `seq` was already stamped (handed to
+     *        transport/buffer, G-10) but that networkTask could not persist
+     *        after its send failed too.
+     *
+     * This is a post-emission device-side loss — the same category as an
+     * eviction (both leave the record gone from local storage), so it is
+     * folded into the same counter as droppedCount() instead of the
+     * pre-emission `meta.lost` count: `seq` was already advanced for this
+     * record, so the loss must be visible as `meta.store.drop`, not `lost`.
+     */
+    virtual void recordEmittedLoss() = 0;
 
     /** @return "sd", "littlefs" or "none". Reported in every message so a node
      *          that fell back to internal flash says so. */

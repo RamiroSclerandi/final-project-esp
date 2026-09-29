@@ -1,11 +1,20 @@
 #include "config/Provisioning.h"
 
+#include "core/ConfigLimits.h"
+#include "core/Deadline.h"
 #include "core/DeviceInfo.h"
+#include "core/ModbusAvailability.h"
+#include "core/ModbusBuildFlag.h"
+#include "core/ProvisioningTimeout.h"
 
 #include <Arduino.h>
 
 namespace
 {
+    // Returned by waitForKey() when no input arrived within the timeout.
+    // Never produced by a real keypress: only c > 0x20 is accepted there.
+    constexpr char NO_KEY = '\0';
+
     void drainSerialInput()
     {
         while (Serial.available())
@@ -14,9 +23,14 @@ namespace
         }
     }
 
-    /** Blocks until a printable character arrives. */
+    /**
+     * Blocks until a printable character arrives, or returns NO_KEY after
+     * ProvisioningTimeout::INPUT_TIMEOUT_MS with no input — a headless boot
+     * (no serial terminal attached) must not hang here forever.
+     */
     char waitForKey()
     {
+        const uint32_t waitStart = millis();
         while (true)
         {
             if (Serial.available())
@@ -27,25 +41,50 @@ namespace
                     return (char)c;
                 }
             }
+            if (ProvisioningTimeout::hasTimedOut(millis(), waitStart))
+            {
+                return NO_KEY;
+            }
             delay(20);
         }
     }
 
-    /** Reads a decimal number terminated by Enter. Returns fallback if empty. */
+    /**
+     * Reads a decimal number terminated by Enter. Returns fallback if empty,
+     * if ProvisioningTimeout::INPUT_TIMEOUT_MS elapses with no accepted
+     * input, or once ProvisioningTimeout::HARD_CAP_MS elapses regardless.
+     *
+     * The timeout restarts only on an accepted character (a digit or a
+     * terminator, per ProvisioningTimeout::isAcceptedInputChar) — an
+     * operator typing slowly is still actively responding and must not be
+     * cut off mid-entry — but never on anything else: a noisy or floating
+     * RX line delivering junk bytes must not be able to hold setup() open
+     * forever. HARD_CAP_MS bounds the call even under continuous accepted
+     * input.
+     */
     uint32_t readNumber(uint32_t fallback)
     {
         char buffer[16] = {0};
         uint8_t length = 0;
+        ProvisioningTimeout::ActivityTimeout timeout(millis());
 
         while (true)
         {
             if (!Serial.available())
             {
+                if (timeout.hasTimedOut(millis()))
+                {
+                    return fallback;
+                }
                 delay(20);
                 continue;
             }
 
             const int c = Serial.read();
+            if (ProvisioningTimeout::isAcceptedInputChar(c))
+            {
+                timeout.noteActivity(millis());
+            }
 
             if (c == '\r' || c == '\n')
             {
@@ -159,8 +198,20 @@ namespace
                       config.isSensorEnabled(SensorKey::BMP280) ? "SI" : "no");
         Serial.printf(" 3) DHT22 (temp/humedad) ... %s\n",
                       config.isSensorEnabled(SensorKey::DHT22) ? "SI" : "no");
+#if DL_ENABLE_MODBUS
         Serial.printf(" 4) Medidor Modbus ......... %s\n",
                       config.isSensorEnabled(SensorKey::MODBUS_METER) ? "SI" : "no");
+#else
+        if (ModbusAvailability::isConfiguredButExcluded(
+                false, config.isSensorEnabled(SensorKey::MODBUS_METER)))
+        {
+            Serial.println(" 4) Medidor Modbus ......... configurado, pero excluido de este build");
+        }
+        else
+        {
+            Serial.println(" 4) Medidor Modbus ......... deshabilitado en este build");
+        }
+#endif
         Serial.printf(" 5) Intervalo de muestreo .. %lu ms\n",
                       (unsigned long)config.samplingIntervalMs());
         Serial.printf(" 6) Intervalo de envio ..... %lu ms\n",
@@ -189,18 +240,28 @@ namespace
         Serial.print("  Opcion: ");
 
         const char key = waitForKey();
-        Serial.println(key);
 
         if (key == '1')
         {
+            Serial.println(key);
             config.setTransport(TransportKind::WIFI_MQTT);
         }
         else if (key == '2')
         {
+            Serial.println(key);
             config.setTransport(TransportKind::LORAWAN);
+        }
+        else if (key == NO_KEY)
+        {
+            // No input within the timeout: fall back to the transport most
+            // devices use, so a headless boot with no transport chosen yet
+            // does not spin in runIfNeeded's "must pick a transport" loop.
+            Serial.println("  Sin respuesta - se usa WiFi + MQTT por defecto.");
+            config.setTransport(TransportKind::WIFI_MQTT);
         }
         else
         {
+            Serial.println(key);
             Serial.println("  Opcion invalida, sin cambios.");
         }
     }
@@ -227,13 +288,28 @@ namespace
             toggleSensor(config, SensorKey::DHT22, "DHT22");
             return false;
         case '4':
+#if DL_ENABLE_MODBUS
             toggleSensor(config, SensorKey::MODBUS_METER, "Medidor Modbus");
+#else
+            Serial.println("\n  Medidor Modbus deshabilitado en este build.");
+#endif
             return false;
 
-        case '5':
+        case '5': {
             Serial.print("\n\n  Intervalo de muestreo en ms (Enter = sin cambios): ");
-            config.setSamplingIntervalMs(readNumber(config.samplingIntervalMs()));
+            const uint32_t requested = readNumber(config.samplingIntervalMs());
+            if (ConfigLimits::isValidSamplingIntervalMs(requested))
+            {
+                config.setSamplingIntervalMs(requested);
+            }
+            else
+            {
+                Serial.printf("\n  Fuera de rango (%lu..%lu ms), sin cambios.\n",
+                              (unsigned long)ConfigLimits::SAMPLING_INTERVAL_MIN_MS,
+                              (unsigned long)ConfigLimits::SAMPLING_INTERVAL_MAX_MS);
+            }
             return false;
+        }
 
         case '6':
             Serial.print("\n\n  Intervalo de envio en ms (Enter = sin cambios): ");
@@ -314,10 +390,34 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
 
     drainSerialInput();
 
+    // waitForKey() restarts its window on every stray byte, so a noisy RX line
+    // could keep the menu alive forever; the session cap always ends it.
+    const uint32_t sessionStartMs = millis();
+    const auto isSessionOver = [sessionStartMs]() {
+        return Deadline::hasElapsed(millis(), sessionStartMs, ProvisioningTimeout::HARD_CAP_MS);
+    };
+
     while (true)
     {
+        if (isSessionOver())
+        {
+            Serial.println("\n[Setup] Tiempo maximo de setup agotado - se continua con la "
+                           "configuracion actual.");
+            break;
+        }
+
         printMenu(config);
         const char choice = waitForKey();
+
+        if (choice == NO_KEY)
+        {
+            // Headless boot or an operator who walked away: stop prompting
+            // and continue with whatever configuration already exists
+            // (seeded defaults on a first boot) instead of hanging here.
+            Serial.println("\n[Setup] Sin respuesta - se continua con la configuracion actual.");
+            break;
+        }
+
         Serial.println(choice);
 
         if (handleChoice(config, choice))
@@ -329,6 +429,13 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
     // Refuse to leave setup without a transport: every later stage assumes one.
     while (config.transport() == TransportKind::UNSET)
     {
+        if (isSessionOver())
+        {
+            Serial.println(
+                "\n[Setup] Tiempo maximo de setup agotado - se usa WiFi + MQTT por defecto.");
+            config.setTransport(TransportKind::WIFI_MQTT);
+            break;
+        }
         Serial.println("\n[Setup] Falta elegir el transporte antes de continuar.");
         chooseTransport(config);
     }

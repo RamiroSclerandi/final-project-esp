@@ -1,0 +1,12 @@
+# cppcheck suppression baseline for `pio check -e esp32dev`.
+# Format: <id>[:<file glob>[:<line>]]. Every entry here is accepted debt;
+# a finding not covered below fails CI at medium or high severity.
+
+# Third-party libraries are not ours to fix. The two HIGH
+# preprocessorErrorDirective findings in ArduinoJson are cppcheck failing to
+# expand ARDUINOJSON_CONCAT_, not real defects.
+*:*.pio*libdeps*
+
+# Interface methods are reached only through virtual dispatch and
+# main.cpp's wiring, which cppcheck's whole-program pass cannot follow.
+unusedFunction

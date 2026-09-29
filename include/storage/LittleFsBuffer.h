@@ -1,5 +1,10 @@
 #pragma once
 
+#include <atomic>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include "storage/ILocalBuffer.h"
 
 /**
@@ -16,6 +21,13 @@
  * Internal flash endures roughly 100k erase cycles per sector, so this is
  * contingency storage, not normal operation: records are only written when a
  * transmission has failed. With the link up, nothing is written at all.
+ *
+ * The sensor task (core 0) appends while the network task (core 1) peeks and
+ * drops, so every public file operation is guarded by one non-recursive
+ * mutex, created lazily in begin(). Private helpers assume the lock is
+ * already held and never take it themselves. Before begin() runs, or if
+ * the lock cannot be taken within LOCK_TIMEOUT_MS, a call fails closed
+ * (returns false/0) rather than proceeding unguarded.
  */
 class LittleFsBuffer : public ILocalBuffer
 {
@@ -26,19 +38,46 @@ public:
     /** Rewrite the file once this many bytes have been consumed from the front. */
     static constexpr size_t COMPACT_THRESHOLD = 32 * 1024;
 
+    /** Longest wait for the lock; on timeout the operation fails, never blocks. */
+    static constexpr uint32_t LOCK_TIMEOUT_MS = 5000;
+
+    LittleFsBuffer() = default;
+    LittleFsBuffer(const LittleFsBuffer &) = delete;
+    LittleFsBuffer &operator=(const LittleFsBuffer &) = delete;
+    ~LittleFsBuffer() override;
+
     bool begin() override;
     bool append(const uint8_t *payload, size_t length) override;
     bool hasPending() const override;
     size_t peekOldest(uint8_t *out, size_t outSize) override;
+    /**
+     * @brief Drops the record returned by the last peekOldest(). A no-op
+     *        returning false if an eviction removed that record meanwhile,
+     *        so a late confirmation never discards an unsent record.
+     */
     bool dropOldest() override;
     uint8_t usedPercent() const override;
     uint32_t pendingCount() const override;
     uint32_t droppedCount() const override;
+    void recordEmittedLoss() override;
     const char *kind() const override;
 
 private:
+    /** Mounts the filesystem and restores the read offset and pending count. */
+    bool mount();
+
     /** Drops leading records until the file fits under MAX_BYTES. */
     void makeRoom(size_t incomingLength);
+
+    /**
+     * @brief Logs a lock timeout distinctly from a genuinely full/empty
+     *        buffer, so an operator reading serial output does not mistake
+     *        contention for capacity.
+     */
+    void logLockTimeout(const char *operation) const;
+
+    /** dropOldest() without the lock or the peek-token check. */
+    bool dropOldestLocked();
 
     /** Rewrites the file without the already-consumed prefix. */
     bool compact();
@@ -46,8 +85,27 @@ private:
     void persistOffset();
     void recountPending();
 
+    SemaphoreHandle_t _mutex = nullptr;
     size_t _readOffset = 0;
-    uint32_t _pending = 0;
-    uint32_t _dropped = 0;
-    bool _mounted = false;
+
+    // Atomic so meta telemetry can read them from the other core lock-free.
+    std::atomic<uint32_t> _pending{0};
+
+    // Two separate counters, summed by droppedCount() for meta.store.drop:
+    // _evicted (makeRoom() reclaiming space) drives the peek token, so a
+    // recordEmittedLoss() between peek() and dropOldest() can never be
+    // mistaken for an eviction of the record that was just peeked.
+    std::atomic<uint32_t> _evicted{0};
+    std::atomic<uint32_t> _emittedLoss{0};
+    std::atomic<bool> _mounted{false};
+
+    // Cached so a lock timeout in usedPercent() can report the last known
+    // capacity instead of misreporting contention as an empty buffer.
+    // mutable: written from usedPercent(), which is otherwise a pure read.
+    mutable std::atomic<uint8_t> _lastUsedPercent{0};
+
+    // _evicted at the last peek; a mismatch means the peeked record was
+    // evicted (not just accounted as an emitted loss elsewhere).
+    uint32_t _peekToken = 0;
+    bool _hasPeekToken = false;
 };
