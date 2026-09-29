@@ -1,6 +1,6 @@
-// Characterizes the CURRENT behavior of MeasurementAccumulator (v1.1.0):
-// no production logic changes in this PR, only pinned-down documentation of
-// what it does today so later fixes have a safety net.
+// Characterizes MeasurementAccumulator's aggregation behavior: reset,
+// accumulate, and out-of-bounds channel access. Test-only — this file never
+// changes MeasurementAccumulator itself.
 #include <unity.h>
 
 #include "core/MeasurementAccumulator.h"

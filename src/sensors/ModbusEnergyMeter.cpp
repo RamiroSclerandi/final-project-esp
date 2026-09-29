@@ -1,6 +1,10 @@
 #include "sensors/ModbusEnergyMeter.h"
 
+#include "core/Deadline.h"
+
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 namespace
 {
@@ -161,13 +165,21 @@ bool ModbusEnergyMeter::readRegisters(uint16_t startAddress, uint8_t registerCou
     }
 
     size_t received = 0;
-    const uint32_t deadline = millis() + RESPONSE_TIMEOUT_MS;
+    const uint32_t waitStart = millis();
 
-    while (received < expected && millis() < deadline)
+    // Deadline.h keeps this correct across a millis() rollover, unlike a raw
+    // `millis() < start + timeout` comparison. Yielding instead of
+    // busy-spinning while waiting for the next byte lets other tasks run —
+    // in particular sensorTask's own watchdog feed on the same core.
+    while (received < expected && !Deadline::hasElapsed(millis(), waitStart, RESPONSE_TIMEOUT_MS))
     {
         if (_serial.available())
         {
             response[received++] = (uint8_t)_serial.read();
+        }
+        else
+        {
+            vTaskDelay(1);
         }
     }
 

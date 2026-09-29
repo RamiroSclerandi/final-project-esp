@@ -15,6 +15,14 @@ struct PayloadMeta
     uint32_t bootCount;    ///< Increments once per boot; orders sequences across reboots.
     const char *resetReason; ///< Why the device last restarted, or nullptr.
 
+    /**
+     * Cumulative device-side losses since this boot (failed encode, oversize
+     * guard, or queue-full-and-buffer-append-failure — see EmissionOutcome).
+     * Always emitted, 0 when nothing was lost, so a downstream consumer can
+     * subtract it from a seq gap to isolate true transport/broker loss (G-10).
+     */
+    uint32_t lostCount;
+
     // Local buffer health. Reported so a node that fell back from SD to
     // internal flash says so, instead of degrading silently.
     const char *storeKind; ///< "sd" | "littlefs" | "none", or nullptr to omit.

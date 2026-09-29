@@ -20,4 +20,23 @@ namespace ConfigLimits
     {
         return intervalMs >= SAMPLING_INTERVAL_MIN_MS && intervalMs <= SAMPLING_INTERVAL_MAX_MS;
     }
+
+    /**
+     * @brief Repairs a stored value that predates this validation, or that
+     *        otherwise ended up out of range.
+     * @return intervalMs unchanged if already valid, otherwise the nearest
+     *         bound.
+     */
+    inline uint32_t clampSamplingIntervalMs(uint32_t intervalMs)
+    {
+        if (intervalMs < SAMPLING_INTERVAL_MIN_MS)
+        {
+            return SAMPLING_INTERVAL_MIN_MS;
+        }
+        if (intervalMs > SAMPLING_INTERVAL_MAX_MS)
+        {
+            return SAMPLING_INTERVAL_MAX_MS;
+        }
+        return intervalMs;
+    }
 }

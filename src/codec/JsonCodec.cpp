@@ -25,6 +25,11 @@ size_t JsonCodec::encode(const MeasurementAccumulator &readings,
     // sessions, which also makes unexpected reboots visible to the server.
     metaObj["boot"] = meta.bootCount;
 
+    // Always emitted, including 0: the server cannot tell "no loss" from
+    // "field absent" otherwise. Subtracting it (plus meta.store.drop) from a
+    // seq gap isolates true transport/broker loss (G-10).
+    metaObj["lost"] = meta.lostCount;
+
     // Lets the server flag readings whose timestamp is the arrival time rather
     // than the acquisition time, which are lower-quality data points.
     metaObj["ts_src"] = DeviceInfo::isClockSynced() ? "device" : "server";

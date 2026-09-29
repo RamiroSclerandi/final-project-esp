@@ -23,8 +23,11 @@
  * transmission has failed. With the link up, nothing is written at all.
  *
  * The sensor task (core 0) appends while the network task (core 1) peeks and
- * drops, so every file operation runs under one non-recursive mutex. Public
- * methods lock; private helpers assume the lock is held and never take it.
+ * drops, so every public file operation is guarded by one non-recursive
+ * mutex, created lazily in begin(). Private helpers assume the lock is
+ * already held and never take it themselves. Before begin() runs, or if
+ * the lock cannot be taken within LOCK_TIMEOUT_MS, a call fails closed
+ * (returns false/0) rather than proceeding unguarded.
  */
 class LittleFsBuffer : public ILocalBuffer
 {
