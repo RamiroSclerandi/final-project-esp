@@ -76,12 +76,15 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          if ! output=$(git clang-format --diff --extensions c,cpp,h,hpp "origin/${BASE_REF}"); then
-            echo "$output"
-            echo "git clang-format failed to run" >&2
+          # git clang-format --diff exits 1 both when it finds a diff and when it
+          # crashes, so the output decides which one happened.
+          status=0
+          output=$(git clang-format --diff --extensions c,cpp,h,hpp "origin/${BASE_REF}") || status=$?
+          echo "$output"
+          if [ "$status" -ne 0 ] && [ "${output#diff --git}" = "$output" ]; then
+            echo "git clang-format failed to run (exit $status)" >&2
             exit 1
           fi
-          echo "$output"
           case "$output" in
             "" | *"no modified files to format"* | *"clang-format did not modify any files"*) exit 0 ;;
             *) exit 1 ;;

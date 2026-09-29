@@ -1,6 +1,7 @@
 #include "config/Provisioning.h"
 
 #include "core/ConfigLimits.h"
+#include "core/Deadline.h"
 #include "core/DeviceInfo.h"
 #include "core/ModbusAvailability.h"
 #include "core/ModbusBuildFlag.h"
@@ -389,8 +390,22 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
 
     drainSerialInput();
 
+    // waitForKey() restarts its window on every stray byte, so a noisy RX line
+    // could keep the menu alive forever; the session cap always ends it.
+    const uint32_t sessionStartMs = millis();
+    const auto isSessionOver = [sessionStartMs]() {
+        return Deadline::hasElapsed(millis(), sessionStartMs, ProvisioningTimeout::HARD_CAP_MS);
+    };
+
     while (true)
     {
+        if (isSessionOver())
+        {
+            Serial.println("\n[Setup] Tiempo maximo de setup agotado - se continua con la "
+                           "configuracion actual.");
+            break;
+        }
+
         printMenu(config);
         const char choice = waitForKey();
 
@@ -414,6 +429,13 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
     // Refuse to leave setup without a transport: every later stage assumes one.
     while (config.transport() == TransportKind::UNSET)
     {
+        if (isSessionOver())
+        {
+            Serial.println(
+                "\n[Setup] Tiempo maximo de setup agotado - se usa WiFi + MQTT por defecto.");
+            config.setTransport(TransportKind::WIFI_MQTT);
+            break;
+        }
         Serial.println("\n[Setup] Falta elegir el transporte antes de continuar.");
         chooseTransport(config);
     }

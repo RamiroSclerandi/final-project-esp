@@ -37,6 +37,7 @@
 #define MODBUS_BAUD_RATE 9600
 
 // --- SPI pins for SD card — commented until module is available --------
+// ATENCION: CS=5 choca con RS485_DE_PIN=5. Elegir otro pin antes de habilitar la SD.
 // #define SD_CS_PIN       5
 // #define SD_MOSI_PIN     23
 // #define SD_MISO_PIN     19
@@ -44,4 +45,6 @@
 
 // --- Sampling ----------------------------------------------------------
 // Solo se usa en el PRIMER arranque, para sembrar NVS. Despues manda el setup.
+// Debe coincidir con DeviceConfig.cpp (5000); un config.h local con otro valor
+// (p. ej. 15000) solo cambia la siembra inicial, no la configuracion ya guardada.
 #define DEFAULT_SAMPLING_INTERVAL_MS 5000 // 5 segundos
