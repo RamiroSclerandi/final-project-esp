@@ -39,11 +39,11 @@ epoch `1700000000`, clock reported as synced).
 - `meta_lost_nonzero.json` — same scenario with `meta.lost:3`, documenting a
   boot that recorded three device-side drops before this payload was built.
 
-`meta.store.drop` (buffer eviction count) predates this PR — `valid.json`
-and the `meta_lost_*` fixtures all omit the `meta.store` object because
-their `PayloadMeta.storeKind` is `nullptr` in the test setup, not because
-the field does not exist; production always sets `storeKind`, so a real
-device's payloads carry `meta.store.drop` alongside `meta.lost`.
+`valid.json` and the `meta_lost_*` fixtures all omit the `meta.store`
+object because their `PayloadMeta.storeKind` is `nullptr` in the test
+setup, not because the field does not exist; production always sets
+`storeKind`, so a real device's payloads carry `meta.store.drop` alongside
+`meta.lost`.
 
 ## seq gap invariant (G-10)
 
@@ -55,9 +55,10 @@ device-side loss, and only one of them ever explains a `seq` gap:
   queue-full-and-buffer-append-failure). `seq` was never stamped for these,
   so they never open a gap.
 - `meta.store.drop` — POST-EMISSION drops: a record whose `seq` WAS already
-  assigned, then lost from local storage — either evicted under space
-  pressure, or lost when networkTask's send failed and its own re-append
-  also failed. Both leave a `seq` gap.
+  assigned, then lost from local storage — either an *undelivered* record
+  evicted under space pressure (an eviction later still delivered does not
+  count), or lost when networkTask's send failed and its own re-append also
+  failed. Both leave a `seq` gap.
 
 So: `seq gap = transport/broker loss + Δmeta.store.drop`, and
 `total device loss = Δmeta.lost + Δmeta.store.drop`. Subtracting
