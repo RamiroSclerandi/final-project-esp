@@ -68,6 +68,7 @@ private:
 
     /** Drops leading records until the file fits under MAX_BYTES. */
     void makeRoom(size_t incomingLength);
+    void noteEviction();
 
     /**
      * @brief Logs a lock timeout distinctly from a genuinely full/empty
@@ -92,8 +93,10 @@ private:
     std::atomic<uint32_t> _pending{0};
 
     // Two separate counters, summed by droppedCount() for meta.store.drop:
-    // _evicted (makeRoom() reclaiming space) drives the peek token, so a
-    // recordEmittedLoss() between peek() and dropOldest() can never be
+    // _evicted counts makeRoom() evictions; the in-flight peeked record is
+    // counted only once its send is known to have failed (next peekOldest()),
+    // never counted and later undone, so droppedCount() is monotonic. Keeping it apart from
+    // _emittedLoss also means a recordEmittedLoss() between peek() and dropOldest() can never be
     // mistaken for an eviction of the record that was just peeked.
     std::atomic<uint32_t> _evicted{0};
     std::atomic<uint32_t> _emittedLoss{0};
@@ -104,8 +107,8 @@ private:
     // mutable: written from usedPercent(), which is otherwise a pure read.
     mutable std::atomic<uint8_t> _lastUsedPercent{0};
 
-    // _evicted at the last peek; a mismatch means the peeked record was
-    // evicted (not just accounted as an emitted loss elsewhere).
-    uint32_t _peekToken = 0;
+    // Set by makeRoom() when it evicts the record peeked by the last peek();
+    // dropOldest() then knows the peeked record is gone and keeps the next one.
+    bool _peekEvicted = false;
     bool _hasPeekToken = false;
 };

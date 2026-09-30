@@ -6,6 +6,7 @@
 #include "core/ModbusAvailability.h"
 #include "core/ModbusBuildFlag.h"
 #include "core/ProvisioningTimeout.h"
+#include "core/TransportFallback.h"
 
 #include <Arduino.h>
 
@@ -70,14 +71,15 @@ namespace
 
         while (true)
         {
-            if (!Serial.available())
+            switch (ProvisioningTimeout::nextReadWaitStep(timeout, millis(), Serial.available()))
             {
-                if (timeout.hasTimedOut(millis()))
-                {
-                    return fallback;
-                }
+            case ProvisioningTimeout::ReadWaitStep::TimedOut:
+                return fallback;
+            case ProvisioningTimeout::ReadWaitStep::Idle:
                 delay(20);
                 continue;
+            case ProvisioningTimeout::ReadWaitStep::HasByte:
+                break;
             }
 
             const int c = Serial.read();
@@ -253,11 +255,24 @@ namespace
         }
         else if (key == NO_KEY)
         {
-            // No input within the timeout: fall back to the transport most
-            // devices use, so a headless boot with no transport chosen yet
-            // does not spin in runIfNeeded's "must pick a transport" loop.
-            Serial.println("  Sin respuesta - se usa WiFi + MQTT por defecto.");
-            config.setTransport(TransportKind::WIFI_MQTT);
+            // No input within the timeout: only a still-UNSET transport
+            // gets the WiFi+MQTT default, so a headless boot with no
+            // transport chosen yet does not spin in runIfNeeded's "must
+            // pick a transport" loop — but a repeated timeout must not
+            // silently override an operator's earlier explicit choice
+            // (e.g. LoRaWAN).
+            const bool wasUnset = config.transport() == TransportKind::UNSET;
+            config.setTransport(TransportFallback::resolveAfterTimeout(
+                config.transport(), TransportKind::UNSET, TransportKind::WIFI_MQTT));
+            if (wasUnset)
+            {
+                Serial.println("  Sin respuesta - se usa WiFi + MQTT por defecto.");
+            }
+            else
+            {
+                Serial.printf("  Sin respuesta - se mantiene %s.\n",
+                              transportName(config.transport()));
+            }
         }
         else
         {
@@ -390,8 +405,11 @@ void Provisioning::runIfNeeded(DeviceConfig &config)
 
     drainSerialInput();
 
-    // waitForKey() restarts its window on every stray byte, so a noisy RX line
-    // could keep the menu alive forever; the session cap always ends it.
+    // Every individual wait already bounds itself (waitForKey()'s window is
+    // fixed from when it starts; readNumber()'s activity window is capped by
+    // HARD_CAP_MS), but the menu loop below has no bound of its own: a
+    // stream of quick, valid keypresses could keep reopening the menu
+    // forever. The session cap ends the whole session regardless.
     const uint32_t sessionStartMs = millis();
     const auto isSessionOver = [sessionStartMs]() {
         return Deadline::hasElapsed(millis(), sessionStartMs, ProvisioningTimeout::HARD_CAP_MS);

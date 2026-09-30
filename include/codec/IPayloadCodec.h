@@ -34,11 +34,12 @@ struct PayloadMeta
     /**
      * Cumulative POST-EMISSION device-side losses since this boot: a
      * record whose `seq` was already assigned, then lost from local
-     * storage — either evicted under space pressure, or lost when
-     * networkTask's send failed and its own re-append also failed. Both
-     * causes open a `seq` gap, so downstream: true transport/broker loss =
-     * (seq gap) − Δ`storeDropped`; total device loss = Δ`lostCount` +
-     * Δ`storeDropped` (G-10).
+     * storage — either an *undelivered* record evicted under space
+     * pressure (an eviction later still delivered does not count), or lost
+     * when networkTask's send failed and its own re-append also failed.
+     * Both causes open a `seq` gap, so downstream: true transport/broker
+     * loss = (seq gap) − Δ`storeDropped`; total device loss = Δ`lostCount`
+     * + Δ`storeDropped` (G-10).
      */
     uint32_t storeDropped;
 };
