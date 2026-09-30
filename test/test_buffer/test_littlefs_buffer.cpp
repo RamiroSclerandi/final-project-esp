@@ -221,13 +221,11 @@ void test_drop_after_eviction_keeps_the_unsent_record(void)
 
     // dropOldest() is only ever called after a confirmed send (ILocalBuffer
     // contract), so record 0 WAS delivered even though makeRoom() evicted it
-    // first. That must not inflate meta.store.drop without a matching seq
-    // gap (G-10): droppedCount() must be back to what it was before record 0
-    // was ever evicted.
+    // first. That must never be counted in meta.store.drop (G-10).
     TEST_ASSERT_EQUAL_UINT32(0, buffer.droppedCount());
 }
 
-void test_drop_after_eviction_of_multiple_records_undoes_only_the_peeked_one(void)
+void test_drop_after_eviction_of_multiple_records_counts_only_the_unpeeked_one(void)
 {
     LittleFsBuffer buffer;
     buffer.begin();
@@ -246,8 +244,51 @@ void test_drop_after_eviction_of_multiple_records_undoes_only_the_peeked_one(voi
 
     TEST_ASSERT_FALSE(buffer.dropOldest());
 
-    // Only record 0's eviction is undone; record 1's genuine loss still
-    // counts, so droppedCount() must be 1, not 0 and not 2.
+    // Record 0 (in flight) is never counted; record 1's genuine loss is, so
+    // droppedCount() must be 1, not 0 and not 2.
+    TEST_ASSERT_EQUAL_UINT32(1, buffer.droppedCount());
+}
+
+void test_dropped_count_never_decreases_across_peeked_record_eviction(void)
+{
+    LittleFsBuffer buffer;
+    buffer.begin();
+    for (int index = 0; index < RECORDS_THAT_FIT; index++)
+    {
+        appendIndexedRecord(buffer, index);
+    }
+    TEST_ASSERT_EQUAL_STRING("0000", peekText(buffer, 5).c_str());
+    const uint32_t beforeEviction = buffer.droppedCount();
+
+    // A payload built here would report meta.store.drop; the in-flight
+    // record's fate is still undecided, so it must not be counted yet.
+    TEST_ASSERT_TRUE(appendIndexedRecord(buffer, RECORDS_THAT_FIT));
+    const uint32_t betweenEvictionAndDrop = buffer.droppedCount();
+    TEST_ASSERT_FALSE(buffer.dropOldest());
+    const uint32_t afterDrop = buffer.droppedCount();
+
+    TEST_ASSERT_TRUE(betweenEvictionAndDrop >= beforeEviction);
+    TEST_ASSERT_TRUE(afterDrop >= betweenEvictionAndDrop);
+    TEST_ASSERT_EQUAL_UINT32(betweenEvictionAndDrop, afterDrop);
+    TEST_ASSERT_EQUAL_UINT32(0, afterDrop);
+}
+
+void test_peeked_record_evicted_then_failed_send_is_counted_on_next_peek(void)
+{
+    LittleFsBuffer buffer;
+    buffer.begin();
+    for (int index = 0; index < RECORDS_THAT_FIT; index++)
+    {
+        appendIndexedRecord(buffer, index);
+    }
+    TEST_ASSERT_EQUAL_STRING("0000", peekText(buffer, 5).c_str());
+
+    // The in-flight record is evicted, then its send fails: no dropOldest()
+    // confirms delivery, so the next peek must count it as lost.
+    TEST_ASSERT_TRUE(appendIndexedRecord(buffer, RECORDS_THAT_FIT));
+    TEST_ASSERT_EQUAL_UINT32(0, buffer.droppedCount());
+
+    TEST_ASSERT_EQUAL_STRING("0001", peekText(buffer, 5).c_str());
     TEST_ASSERT_EQUAL_UINT32(1, buffer.droppedCount());
 }
 
@@ -353,7 +394,9 @@ int main(void)
     RUN_TEST(test_full_buffer_evicts_oldest_and_counts_drop);
     RUN_TEST(test_consumed_prefix_is_compacted_past_threshold);
     RUN_TEST(test_drop_after_eviction_keeps_the_unsent_record);
-    RUN_TEST(test_drop_after_eviction_of_multiple_records_undoes_only_the_peeked_one);
+    RUN_TEST(test_drop_after_eviction_of_multiple_records_counts_only_the_unpeeked_one);
+    RUN_TEST(test_dropped_count_never_decreases_across_peeked_record_eviction);
+    RUN_TEST(test_peeked_record_evicted_then_failed_send_is_counted_on_next_peek);
     RUN_TEST(test_emitted_loss_between_peek_and_drop_does_not_block_the_drop);
     RUN_TEST(test_lock_timeout_rejects_operations_without_side_effects);
     RUN_TEST(test_used_percent_returns_last_known_value_on_lock_timeout);

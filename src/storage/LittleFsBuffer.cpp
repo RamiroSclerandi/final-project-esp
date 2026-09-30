@@ -158,7 +158,7 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
         {
             break;
         }
-        _evicted++;
+        noteEviction();
 
         if (_readOffset == before)
         {
@@ -182,6 +182,21 @@ void LittleFsBuffer::makeRoom(size_t incomingLength)
     compact();
     Serial.printf("[Buffer] Almacenamiento lleno. Total descartados: %lu\n",
                   (unsigned long)droppedCount());
+}
+
+void LittleFsBuffer::noteEviction()
+{
+    // The record networkTask already peeked is the oldest, so it is the first
+    // one evicted after the peek. Its fate is decided by the send outcome
+    // (delivered: no loss; send failed: counted by the next peekOldest()), so
+    // counting it here would make droppedCount() rise and later fall, and a
+    // consumer computing a delta of meta.store.drop would see a negative one.
+    if (_hasPeekToken && !_peekEvicted)
+    {
+        _peekEvicted = true;
+        return;
+    }
+    _evicted++;
 }
 
 void LittleFsBuffer::logLockTimeout(const char *operation) const
@@ -237,7 +252,22 @@ bool LittleFsBuffer::hasPending() const
 size_t LittleFsBuffer::peekOldest(uint8_t *out, size_t outSize)
 {
     ScopedLock lock(_mutex);
-    if (!lock.isHeld() || !hasPending())
+    if (!lock.isHeld())
+    {
+        return 0;
+    }
+
+    // A new peek without an intervening dropOldest() means the previous send
+    // failed. If that record was evicted meanwhile it is gone for good, and
+    // this is the first moment its fate is known, so count it now.
+    if (_hasPeekToken && _peekEvicted)
+    {
+        _evicted++;
+        _hasPeekToken = false;
+        _peekEvicted = false;
+    }
+
+    if (!hasPending())
     {
         return 0;
     }
@@ -264,7 +294,7 @@ size_t LittleFsBuffer::peekOldest(uint8_t *out, size_t outSize)
     file.close();
     out[length] = '\0';
 
-    _peekToken = _evicted;
+    _peekEvicted = false;
     _hasPeekToken = true;
     return length;
 }
@@ -277,19 +307,17 @@ bool LittleFsBuffer::dropOldest()
         return false;
     }
 
-    const bool isPeekedRecordEvicted = _hasPeekToken && _peekToken != _evicted;
+    const bool isPeekedRecordEvicted = _hasPeekToken && _peekEvicted;
     _hasPeekToken = false;
+    _peekEvicted = false;
 
     if (isPeekedRecordEvicted)
     {
-        // makeRoom() already counted this exact record as an eviction before
-        // it could know the send in flight would still succeed. dropOldest()
-        // is only ever called after a confirmed send (ILocalBuffer
-        // contract), so the record was actually delivered, not lost: undo
-        // that premature count so it never inflates meta.store.drop without
-        // a matching seq gap (G-10). It cannot be re-dropped here — makeRoom()
-        // already advanced past it.
-        _evicted--;
+        // makeRoom() already advanced past this exact record and, because its
+        // send was in flight, deliberately did not count it (see
+        // noteEviction()). dropOldest() is only ever called after a confirmed
+        // send (ILocalBuffer contract), so it was delivered, not lost, and
+        // there is nothing left to drop or to uncount.
         return false;
     }
 
