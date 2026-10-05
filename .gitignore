@@ -7,6 +7,10 @@
 
 # Credentials & secrets — never commit these
 include/config.h
+credentials.txt
+.env
+.env.*
+!.env.example
 
 # OS artifacts
 .DS_Store
