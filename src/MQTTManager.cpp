@@ -229,6 +229,9 @@ bool MQTTManager::connectWiFi(const char *ssid, const char *wifiPassword)
 bool MQTTManager::connectMQTT()
 {
     buildTopics();
+    // Also set on the client itself, so no connect that reaches it without
+    // an explicit CA argument can ever skip certificate verification.
+    _wifiClient.setCACert(_caCert);
 
     // The client ID is the device identifier itself: one identity for the
     // topic, the payload, the broker session and the database row.
@@ -283,7 +286,14 @@ bool MQTTManager::runConnectStage(ConnectSequence::Stage stage, const char *clie
 
     case ConnectSequence::Stage::MqttHandshake:
         // PubSubClient reuses the TLS session opened above: it only connects
-        // the client itself when that client is not already connected.
+        // the client itself when that client is not already connected. If the
+        // session already dropped, fail here instead of letting it reconnect
+        // (DNS + TCP + TLS) inside this stage's watchdog budget.
+        if (!_wifiClient.connected())
+        {
+            Serial.println("[MQTT] La sesion TLS se cerro antes del handshake MQTT.");
+            return false;
+        }
         // The last will is registered with the broker at connect time and
         // published by the broker if the connection drops without a clean
         // disconnect — a power loss, which the device could never report.
