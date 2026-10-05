@@ -31,4 +31,10 @@ namespace MqttTimeouts
     constexpr uint32_t TCP_CONNECT_TIMEOUT_S = 5;
     constexpr unsigned long TLS_HANDSHAKE_TIMEOUT_S = 10;
     constexpr uint16_t SOCKET_TIMEOUT_S = 5;
+
+    // Not configurable: WiFiGenericClass::hostByName() waits up to 15000 ms
+    // for lwIP to resolve the host (framework-arduinoespressif32/libraries/
+    // WiFi/src/WiFiGeneric.cpp:1578). Listed so the connect budget in
+    // ConnectSequence.h counts it instead of assuming DNS is instant.
+    constexpr uint32_t DNS_RESOLVE_MAX_S = 15;
 }

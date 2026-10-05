@@ -10,9 +10,10 @@
  */
 namespace WatchdogConfig
 {
-    // Must comfortably exceed the longest legitimate blocking operation,
-    // which is the WiFi association plus the TLS handshake (worst case
-    // TCP connect + TLS handshake + socket write, see MqttTimeouts.h). A
+    // Must comfortably exceed the longest legitimate blocking stretch
+    // between two feeds. For networkTask that is one MQTT connect stage
+    // (see ConnectSequence.h: the attempt is fed before each stage, because
+    // the whole attempt, DNS included, can outlast this timeout). A
     // watchdog that fires on a healthy system is worse than none: it
     // produces a reboot loop that looks exactly like the fault it was
     // meant to catch.
