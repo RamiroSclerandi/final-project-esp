@@ -25,6 +25,7 @@ public:
     bool send(const uint8_t *payload, size_t length) override;
     size_t maxPayloadSize() const override;
     int linkQuality() const override;
+    uint32_t millisOffline() const override;
     const char *name() const override;
 
 private:

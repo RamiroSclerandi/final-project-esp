@@ -36,6 +36,13 @@ int LoRaWANTransport::linkQuality() const
     return 0;
 }
 
+uint32_t LoRaWANTransport::millisOffline() const
+{
+    // No radio stack yet: restarting cannot bring the link up, it would only
+    // reset seq and meta.lost and bump meta.boot every 30 min.
+    return 0;
+}
+
 const char *LoRaWANTransport::name() const
 {
     return "lorawan";

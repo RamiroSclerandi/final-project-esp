@@ -60,6 +60,11 @@ int WiFiMqttTransport::linkQuality() const
     return WiFi.isConnected() ? WiFi.RSSI() : 0;
 }
 
+uint32_t WiFiMqttTransport::millisOffline() const
+{
+    return _mqtt.millisSinceConnected();
+}
+
 const char *WiFiMqttTransport::name() const
 {
     return "wifi-mqtt";
