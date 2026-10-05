@@ -54,14 +54,28 @@ rule that reads the MQTT link even when LoRaWAN is selected (E-7).
   - Route: inline (one header + one source + tests, already understood).
   - RED: `pio test -e native -f test_timing` → compile error, `isAcceptedLineChar` is not a
     member of `ProvisioningTimeout`.
-  - GREEN: 27/27 in `test_timing`, 91/91 native. Commit `c7658c0`.
+  - GREEN: 27/27 in `test_timing`, 91/91 native. Commit `c7658c0`, PR #12 merged as `ad76f56`.
   - Wiring in `Provisioning.cpp` is compile-verified only (no native harness for the loop).
-- [ ] E-4 — Keep every watchdog-fed segment of the MQTT connect well under the WDT,
+- [x] E-4 — Keep every watchdog-fed segment of the MQTT connect well under the WDT,
   including DNS.
   - Route: inline (understood after mapping the framework sources).
+  - Finding: `WiFiClientSecure::connect(host)` resolves through `WiFi.hostByName()`, which
+    waits up to 15 s (`WiFiGeneric.cpp:1578`). The unsplit attempt (DNS 15 + TCP 5 + TLS 10
+    + CONNECT/CONNACK 10 + publish/subscribe writes 10) can block ~50 s on one feed.
+  - Change: `ConnectSequence` stages (ResolveHost, OpenTls, MqttHandshake, Announce), WDT fed
+    before each; TLS opened by IP + host (the framework's own two-step), PubSubClient reuses it.
+  - RED: `fatal error: transport/ConnectSequence.h: No such file or directory`.
+  - GREEN: 31/31 in `test_timing`, 95/95 native. Commits `b3f53f9`, `5c3f702`.
+  - Native review: slice `4d45e02..b3f53f9` reached the delivery budget (406 lines,
+    `slice_budget_reached`), consent granted (pre-authorized), lens `review-reliability`,
+    approved and acknowledged (`review-806f7436ce27a7bf`, authority burned). Advisory finding
+    on the hidden PubSubClient reconnect and the dropped `setCACert()` fixed in `5c3f702`;
+    the `readLine()` caller-contract finding checked and not applicable (`editCredential()`
+    uses a local buffer and keeps the value on `false`).
+  - Hardware only: real timing of each stage, TLS crypto time inside OpenTls.
 - [ ] E-7 — Offline restart must follow the selected transport, not always MQTT.
   - Route: inline.
 
 ## Progress and next step
 
-Next: E-3 PR, then E-4.
+Next: E-4 PR, then E-7.
