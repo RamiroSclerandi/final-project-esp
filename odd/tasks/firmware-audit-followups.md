@@ -45,11 +45,17 @@ rule that reads the MQTT link even when LoRaWAN is selected (E-7).
   - Route: inline (docs outside the repo + one memory update).
   - Evidence: handoff §9 now says 88/88 (11 suites); engram #482 corrected in both
     mentions. No PR (nothing in this repository changes).
-- [ ] E-2 — Ignore `credentials.txt` and `.env` files.
+- [x] E-2 — Ignore `credentials.txt` and `.env` files.
   - Route: inline (one mechanical file).
   - RED: `git check-ignore -v credentials.txt .env .env.local` → exit 1, nothing ignored.
-- [ ] E-3 — Bound `readLine()` in provisioning with the existing activity timeout + hard cap.
+  - GREEN: same command → exit 0. Commit `963a044`, PR #11 merged as `618d417`.
+  - Review assess: medium, `under_budget` (no native review due).
+- [x] E-3 — Bound `readLine()` in provisioning with the existing activity timeout + hard cap.
   - Route: inline (one header + one source + tests, already understood).
+  - RED: `pio test -e native -f test_timing` → compile error, `isAcceptedLineChar` is not a
+    member of `ProvisioningTimeout`.
+  - GREEN: 27/27 in `test_timing`, 91/91 native. Commit `c7658c0`.
+  - Wiring in `Provisioning.cpp` is compile-verified only (no native harness for the loop).
 - [ ] E-4 — Keep every watchdog-fed segment of the MQTT connect well under the WDT,
   including DNS.
   - Route: inline (understood after mapping the framework sources).
@@ -58,4 +64,4 @@ rule that reads the MQTT link even when LoRaWAN is selected (E-7).
 
 ## Progress and next step
 
-Next: E-2 PR.
+Next: E-3 PR, then E-4.

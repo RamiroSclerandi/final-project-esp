@@ -165,6 +165,50 @@ void test_accepted_input_char_rejects_noise_bytes(void)
     TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedInputChar(0x07));
 }
 
+void test_accepted_line_char_matches_printable_editing_and_terminators(void)
+{
+    // readLine() takes free text (SSIDs, hosts, passwords), so every byte it
+    // would store or act on counts as an operator still typing.
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar('a'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar(' '));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar('~'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar('7'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar(8));   // backspace
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar(127)); // delete
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar('\r'));
+    TEST_ASSERT_TRUE(ProvisioningTimeout::isAcceptedLineChar('\n'));
+}
+
+void test_accepted_line_char_rejects_control_and_non_ascii_bytes(void)
+{
+    // Bytes readLine() discards must not extend the wait, or RX noise could
+    // hold a credential prompt open until the hard cap.
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(0x00));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(0x07));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(0x1B));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(0x80));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(0xFF));
+    TEST_ASSERT_FALSE(ProvisioningTimeout::isAcceptedLineChar(-1)); // Serial.read(): no data
+}
+
+void test_read_wait_step_times_out_a_line_left_mid_entry(void)
+{
+    // An operator who opens a credential prompt, types a few characters and
+    // walks away: readLine() must give up INPUT_TIMEOUT_MS after the last
+    // keystroke instead of blocking setup() forever.
+    ProvisioningTimeout::ActivityTimeout timeout(0);
+    const uint32_t lastKeystroke = 2000;
+    timeout.noteActivity(lastKeystroke);
+
+    TEST_ASSERT_EQUAL(
+        ProvisioningTimeout::ReadWaitStep::Idle,
+        ProvisioningTimeout::nextReadWaitStep(
+            timeout, lastKeystroke + ProvisioningTimeout::INPUT_TIMEOUT_MS - 1, false));
+    TEST_ASSERT_EQUAL(ProvisioningTimeout::ReadWaitStep::TimedOut,
+                      ProvisioningTimeout::nextReadWaitStep(
+                          timeout, lastKeystroke + ProvisioningTimeout::INPUT_TIMEOUT_MS, false));
+}
+
 void test_activity_timeout_hard_cap_wins_despite_recent_activity(void)
 {
     // Continuous accepted input (e.g. a digit flood) must not be able to
@@ -268,6 +312,9 @@ int main(void)
     RUN_TEST(test_activity_resets_the_timeout_window);
     RUN_TEST(test_accepted_input_char_matches_digits_and_terminators);
     RUN_TEST(test_accepted_input_char_rejects_noise_bytes);
+    RUN_TEST(test_accepted_line_char_matches_printable_editing_and_terminators);
+    RUN_TEST(test_accepted_line_char_rejects_control_and_non_ascii_bytes);
+    RUN_TEST(test_read_wait_step_times_out_a_line_left_mid_entry);
     RUN_TEST(test_activity_timeout_hard_cap_wins_despite_recent_activity);
     RUN_TEST(test_read_wait_step_cap_fires_under_a_continuous_byte_stream);
     RUN_TEST(test_read_wait_step_is_idle_when_no_byte_and_not_timed_out);

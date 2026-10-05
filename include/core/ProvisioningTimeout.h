@@ -8,7 +8,7 @@
  * @brief Bounds how long the provisioning menu waits for serial input.
  *
  * A device with no serial terminal attached must not hang forever in
- * `waitForKey`/`readNumber` waiting for a keypress that will never come —
+ * `waitForKey`/`readNumber`/`readLine` waiting for a keypress that will never come —
  * boot has to proceed with whatever configuration already exists.
  */
 namespace ProvisioningTimeout
@@ -37,6 +37,17 @@ namespace ProvisioningTimeout
     inline bool isAcceptedInputChar(int c)
     {
         return (c >= '0' && c <= '9') || c == '\r' || c == '\n';
+    }
+
+    /**
+     * @return true for a byte that counts as active input for readLine() —
+     *         printable ASCII, backspace/delete or a CR/LF terminator, i.e.
+     *         every byte readLine() stores or acts on. Anything else is
+     *         discarded without extending the wait.
+     */
+    inline bool isAcceptedLineChar(int c)
+    {
+        return (c >= 0x20 && c < 0x7F) || c == 8 || c == 127 || c == '\r' || c == '\n';
     }
 
     /**
