@@ -61,8 +61,10 @@ jobs:
       - name: Build on-target test suite (no hardware)
         run: pio test -e esp32dev-test --without-uploading --without-testing
 
+  # Runs on push too, not only on pull_request: a job skipped by an `if` counts
+  # as passed for a required check, so a PR-only `format` let a finished push
+  # run satisfy the branch ruleset before the PR run had checked anything.
   format:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +76,9 @@ jobs:
       # reformatted just because a neighbouring line was touched.
       - name: Check formatting of changed lines
         env:
-          BASE_REF: ${{ github.base_ref }}
+          # base_ref is only set on pull_request; a push compares against the
+          # default branch (a push to it has no changed lines, and passes).
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
         run: |
           # git clang-format --diff exits 1 both when it finds a diff and when it
           # crashes, so the output decides which one happened.
