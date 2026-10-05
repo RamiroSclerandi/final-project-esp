@@ -65,7 +65,8 @@ rule that reads the MQTT link even when LoRaWAN is selected (E-7).
   - Change: `ConnectSequence` stages (ResolveHost, OpenTls, MqttHandshake, Announce), WDT fed
     before each; TLS opened by IP + host (the framework's own two-step), PubSubClient reuses it.
   - RED: `fatal error: transport/ConnectSequence.h: No such file or directory`.
-  - GREEN: 31/31 in `test_timing`, 95/95 native. Commits `b3f53f9`, `5c3f702`.
+  - GREEN: 31/31 in `test_timing`, 95/95 native. Commits `b3f53f9`, `5c3f702`, PR #13 merged
+    as `617fa58`.
   - Native review: slice `4d45e02..b3f53f9` reached the delivery budget (406 lines,
     `slice_budget_reached`), consent granted (pre-authorized), lens `review-reliability`,
     approved and acknowledged (`review-806f7436ce27a7bf`, authority burned). Advisory finding
@@ -73,9 +74,17 @@ rule that reads the MQTT link even when LoRaWAN is selected (E-7).
     the `readLine()` caller-contract finding checked and not applicable (`editCredential()`
     uses a local buffer and keeps the value on `false`).
   - Hardware only: real timing of each stage, TLS crypto time inside OpenTls.
-- [ ] E-7 — Offline restart must follow the selected transport, not always MQTT.
+- [x] E-7 — Offline restart must follow the selected transport, not always MQTT.
   - Route: inline.
+  - Change: `ITransport::millisOffline()` (WiFi + MQTT: previous clock; LoRaWAN stub: 0) and
+    `core/OfflineRestart.h` (30 min threshold); `main.cpp` reads the selected transport.
+  - RED 1: `fatal error: core/OfflineRestart.h: No such file or directory`.
+  - RED 2: `'class LoRaWANTransport' has no member named 'millisOffline'`.
+  - GREEN: new suite `test_transport` 4/4, 99/99 native (12 suites). Commit `eb2fe8e`.
+  - Review assess since the last reviewed boundary `b3f53f9`: medium, 133 lines,
+    `under_budget` — `5c3f702` and E-7 remain an unreviewed slice under the budget.
 
 ## Progress and next step
 
-Next: E-4 PR, then E-7.
+All five items implemented. Remaining: hardware validation (see each PR's
+"Requires hardware validation" section).

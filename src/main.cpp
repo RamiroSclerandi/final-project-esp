@@ -14,6 +14,7 @@
 #include "core/MeasurementAccumulator.h"
 #include "core/ModbusAvailability.h"
 #include "core/ModbusBuildFlag.h"
+#include "core/OfflineRestart.h"
 #include "core/SamplingDelay.h"
 #include "core/TransmitSchedule.h"
 #include "core/WatchdogConfig.h"
@@ -40,11 +41,6 @@
 #ifndef MODBUS_BAUD_RATE
 #define MODBUS_BAUD_RATE 9600
 #endif
-
-// Last resort for a link that never recovers. Only safe now that unsent
-// readings are persisted locally: without the buffer, a restart would discard
-// everything still queued in RAM.
-static constexpr uint32_t OFFLINE_RESTART_MS = 30UL * 60UL * 1000UL;
 
 struct SensorReading
 {
@@ -315,8 +311,7 @@ static void networkTask(void *pvParameters)
             replayOneBufferedRecord();
         }
 
-        const uint32_t offlineFor = mqttManager.millisSinceConnected();
-        if (offlineFor > OFFLINE_RESTART_MS)
+        if (OfflineRestart::isDue(transport->millisOffline()))
         {
             Serial.println("[Network] Sin conexion prolongada. Reiniciando...");
             delay(200);

@@ -59,6 +59,15 @@ public:
      */
     virtual int linkQuality() const = 0;
 
+    /**
+     * @brief How long the link has been down, for the offline-restart rule
+     *        (see core/OfflineRestart.h).
+     * @return Milliseconds since the link was last usable (since boot if it
+     *         never was), or 0 when it is up or when a restart could not bring
+     *         it back (e.g. a transport whose radio stack does not exist yet).
+     */
+    virtual uint32_t millisOffline() const = 0;
+
     /** @return Short transport name for logs and telemetry, e.g. "wifi-mqtt". */
     virtual const char *name() const = 0;
 };
