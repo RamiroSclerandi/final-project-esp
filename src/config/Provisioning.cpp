@@ -109,21 +109,36 @@ namespace
     /**
      * Reads a line terminated by Enter. When `masked`, echoes asterisks so a
      * password is not left on screen or in a terminal scrollback.
-     * An empty line leaves the current value untouched.
+     * An empty line leaves the current value untouched, and so does a
+     * timeout: same activity window and hard cap as readNumber(), so an
+     * operator who opens a credential prompt and walks away cannot hold
+     * setup() open forever. A partially typed value is discarded.
      */
     bool readLine(char *out, size_t outSize, bool masked)
     {
         size_t length = 0;
+        ProvisioningTimeout::ActivityTimeout timeout(millis());
 
         while (true)
         {
-            if (!Serial.available())
+            switch (ProvisioningTimeout::nextReadWaitStep(timeout, millis(), Serial.available()))
             {
+            case ProvisioningTimeout::ReadWaitStep::TimedOut:
+                Serial.println("\n  Sin respuesta.");
+                out[0] = '\0';
+                return false;
+            case ProvisioningTimeout::ReadWaitStep::Idle:
                 delay(20);
                 continue;
+            case ProvisioningTimeout::ReadWaitStep::HasByte:
+                break;
             }
 
             const int c = Serial.read();
+            if (ProvisioningTimeout::isAcceptedLineChar(c))
+            {
+                timeout.noteActivity(millis());
+            }
 
             if (c == '\r' || c == '\n')
             {
