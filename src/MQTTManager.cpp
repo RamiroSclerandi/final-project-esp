@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 namespace
 {
@@ -228,6 +229,8 @@ bool MQTTManager::connectWiFi(const char *ssid, const char *wifiPassword)
 bool MQTTManager::connectMQTT()
 {
     buildTopics();
+    // Also set on the client itself, so no connect that reaches it without
+    // an explicit CA argument can ever skip certificate verification.
     _wifiClient.setCACert(_caCert);
 
     // The client ID is the device identifier itself: one identity for the
@@ -237,31 +240,81 @@ bool MQTTManager::connectMQTT()
     Serial.printf("[MQTT] Conectando a %s:%d como \"%s\"...\n",
                   _host, _port, clientId);
 
-    // The last will is registered with the broker at connect time and published
-    // by the broker if the connection drops without a clean disconnect — a
-    // power loss, for instance, which the device could never report itself.
-    const bool connected = _mqttClient.connect(
-        clientId, _user, _password,
-        _statusTopic, WILL_QOS, WILL_RETAIN, STATUS_OFFLINE);
+    // Only networkTask calls this, and it is subscribed to the task watchdog.
+    IPAddress brokerIp;
+    const bool connected = ConnectSequence::run(
+        [this, clientId, &brokerIp](ConnectSequence::Stage stage) {
+            return runConnectStage(stage, clientId, brokerIp);
+        },
+        []() { esp_task_wdt_reset(); });
 
     if (!connected)
     {
-        Serial.printf("[MQTT] Conexion fallida. Estado PubSubClient: %d\n",
-                      _mqttClient.state());
+        // Leaves no half-open TLS session behind for the next attempt.
+        _wifiClient.stop();
         return false;
     }
 
-    Serial.println("[MQTT] Conectado.");
-
-    // Retained so a consumer connecting later immediately learns the state
-    // instead of waiting for the next transition.
-    _mqttClient.publish(_statusTopic, STATUS_ONLINE, WILL_RETAIN);
-
-    _mqttClient.subscribe(_configTopic);
     Serial.printf("[MQTT] Suscripto a configuracion: %s\n", _configTopic);
     Serial.printf("[MQTT] Publicando datos en: %s\n", _dataTopic);
-
     return true;
+}
+
+bool MQTTManager::runConnectStage(ConnectSequence::Stage stage, const char *clientId,
+                                  IPAddress &brokerIp)
+{
+    switch (stage)
+    {
+    case ConnectSequence::Stage::ResolveHost:
+        if (!WiFi.hostByName(_host, brokerIp))
+        {
+            Serial.printf("[MQTT] No se pudo resolver \"%s\".\n", _host);
+            return false;
+        }
+        return true;
+
+    case ConnectSequence::Stage::OpenTls:
+        // Connecting by IP skips a second DNS wait inside the stage; passing
+        // the host keeps SNI and the certificate name check against it.
+        _wifiClient.stop();
+        if (!_wifiClient.connect(brokerIp, _port, _host, _caCert, nullptr, nullptr))
+        {
+            Serial.println("[MQTT] Conexion TLS fallida.");
+            return false;
+        }
+        return true;
+
+    case ConnectSequence::Stage::MqttHandshake:
+        // PubSubClient reuses the TLS session opened above: it only connects
+        // the client itself when that client is not already connected. If the
+        // session already dropped, fail here instead of letting it reconnect
+        // (DNS + TCP + TLS) inside this stage's watchdog budget.
+        if (!_wifiClient.connected())
+        {
+            Serial.println("[MQTT] La sesion TLS se cerro antes del handshake MQTT.");
+            return false;
+        }
+        // The last will is registered with the broker at connect time and
+        // published by the broker if the connection drops without a clean
+        // disconnect — a power loss, which the device could never report.
+        if (!_mqttClient.connect(clientId, _user, _password, _statusTopic, WILL_QOS, WILL_RETAIN,
+                                 STATUS_OFFLINE))
+        {
+            Serial.printf("[MQTT] Conexion fallida. Estado PubSubClient: %d\n",
+                          _mqttClient.state());
+            return false;
+        }
+        Serial.println("[MQTT] Conectado.");
+        return true;
+
+    case ConnectSequence::Stage::Announce:
+        // Retained so a consumer connecting later immediately learns the
+        // state instead of waiting for the next transition.
+        _mqttClient.publish(_statusTopic, STATUS_ONLINE, WILL_RETAIN);
+        _mqttClient.subscribe(_configTopic);
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

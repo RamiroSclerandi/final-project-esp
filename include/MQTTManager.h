@@ -4,6 +4,7 @@
 #include <PubSubClient.h>
 #include <functional>
 
+#include "transport/ConnectSequence.h"
 #include "transport/ConnectionBackoff.h"
 
 /**
@@ -51,6 +52,9 @@ public:
     /**
      * @brief Establish the TLS connection, register the last will and
      *        subscribe to the config topic.
+     *
+     * Runs as ConnectSequence stages and feeds the task watchdog before each
+     * one, so the caller must be a task subscribed to it (networkTask).
      * @return true if connected successfully.
      */
     bool connectMQTT();
@@ -103,6 +107,9 @@ public:
 private:
     /** Builds the topic set from the device identifier. Idempotent. */
     void buildTopics();
+
+    /** Runs one connect stage; `brokerIp` carries the DNS result forward. */
+    bool runConnectStage(ConnectSequence::Stage stage, const char *clientId, IPAddress &brokerIp);
 
     char _host[72];
     uint16_t _port;

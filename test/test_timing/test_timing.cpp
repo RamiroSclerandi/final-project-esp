@@ -1,6 +1,7 @@
 // Pure timing helpers: rollover-safe deadlines, the WDT-sliced sampling delay,
 // the transmit schedule, the clock-synced first-send gate, the provisioning
-// input timeout and the MQTT/TLS timeout budget.
+// input timeout and the MQTT/TLS connect stages and their watchdog budget.
+#include <string>
 #include <unity.h>
 
 #include "core/Deadline.h"
@@ -8,11 +9,28 @@
 #include "core/SamplingDelay.h"
 #include "core/TransmitSchedule.h"
 #include "core/WatchdogConfig.h"
+#include "transport/ConnectSequence.h"
 #include "transport/MqttTimeouts.h"
 
 namespace
 {
     constexpr uint32_t NEAR_ROLLOVER_MS = 0xFFFFFF00UL;
+
+    char stageLetter(ConnectSequence::Stage stage)
+    {
+        switch (stage)
+        {
+        case ConnectSequence::Stage::ResolveHost:
+            return 'R';
+        case ConnectSequence::Stage::OpenTls:
+            return 'T';
+        case ConnectSequence::Stage::MqttHandshake:
+            return 'M';
+        case ConnectSequence::Stage::Announce:
+            return 'A';
+        }
+        return '?';
+    }
 }
 
 void setUp() {}
@@ -278,16 +296,66 @@ void test_mqtt_timeouts_match_the_verified_seconds_values(void)
     TEST_ASSERT_EQUAL_UINT32(5, MqttTimeouts::SOCKET_TIMEOUT_S);
 }
 
-void test_mqtt_timeout_budget_stays_well_under_the_task_watchdog(void)
+void test_dns_bound_matches_the_framework_wait(void)
 {
-    // One connect attempt must not eat the whole WDT budget: TCP connect +
-    // TLS handshake + socket write, or a single slow/unreachable broker
-    // panics the board.
-    const uint32_t pollBudgetS = MqttTimeouts::TCP_CONNECT_TIMEOUT_S +
-                                 MqttTimeouts::TLS_HANDSHAKE_TIMEOUT_S +
-                                 MqttTimeouts::SOCKET_TIMEOUT_S;
+    // WiFiClientSecure::connect(host, ...) resolves through
+    // WiFiGenericClass::hostByName(), which waits up to 15000 ms for lwIP
+    // (pinned Arduino-ESP32 2.0.17, WiFiGeneric.cpp:1578). It is not
+    // configurable, so the connect budget has to account for it.
+    TEST_ASSERT_EQUAL_UINT32(15, MqttTimeouts::DNS_RESOLVE_MAX_S);
+}
 
-    TEST_ASSERT_LESS_THAN_UINT32(WatchdogConfig::TIMEOUT_S, pollBudgetS);
+void test_connect_sequence_feeds_the_watchdog_before_every_stage(void)
+{
+    std::string trace;
+    const bool connected = ConnectSequence::run(
+        [&trace](ConnectSequence::Stage stage) {
+            trace += stageLetter(stage);
+            return true;
+        },
+        [&trace]() { trace += 'F'; });
+
+    TEST_ASSERT_TRUE(connected);
+    TEST_ASSERT_EQUAL_STRING("FRFTFMFA", trace.c_str());
+}
+
+void test_connect_sequence_stops_at_the_first_failing_stage(void)
+{
+    std::string trace;
+    const bool connected = ConnectSequence::run(
+        [&trace](ConnectSequence::Stage stage) {
+            trace += stageLetter(stage);
+            return stage != ConnectSequence::Stage::OpenTls;
+        },
+        [&trace]() { trace += 'F'; });
+
+    TEST_ASSERT_FALSE(connected);
+    TEST_ASSERT_EQUAL_STRING("FRFT", trace.c_str());
+}
+
+void test_an_unsplit_connect_attempt_would_outlast_the_watchdog(void)
+{
+    // Why the attempt is split: DNS + TCP + TLS + CONNECT/CONNACK + status
+    // publish/subscribe, run back to back with a single feed, can block
+    // longer than the task watchdog and panic the board on a bad network.
+    uint32_t totalS = 0;
+    for (const ConnectSequence::Stage stage : ConnectSequence::STAGES)
+    {
+        totalS += ConnectSequence::worstCaseS(stage);
+    }
+    TEST_ASSERT_GREATER_THAN_UINT32(WatchdogConfig::TIMEOUT_S, totalS);
+}
+
+void test_every_connect_stage_leaves_half_the_watchdog_as_margin(void)
+{
+    // Each stage runs between two feeds, so only a single stage has to fit
+    // under the watchdog. Half of it stays free for what the timeouts do not
+    // bound (TLS certificate crypto, the networkTask work around the attempt).
+    for (const ConnectSequence::Stage stage : ConnectSequence::STAGES)
+    {
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(WatchdogConfig::TIMEOUT_S / 2,
+                                         ConnectSequence::worstCaseS(stage));
+    }
 }
 
 int main(void)
@@ -319,6 +387,10 @@ int main(void)
     RUN_TEST(test_read_wait_step_cap_fires_under_a_continuous_byte_stream);
     RUN_TEST(test_read_wait_step_is_idle_when_no_byte_and_not_timed_out);
     RUN_TEST(test_mqtt_timeouts_match_the_verified_seconds_values);
-    RUN_TEST(test_mqtt_timeout_budget_stays_well_under_the_task_watchdog);
+    RUN_TEST(test_dns_bound_matches_the_framework_wait);
+    RUN_TEST(test_connect_sequence_feeds_the_watchdog_before_every_stage);
+    RUN_TEST(test_connect_sequence_stops_at_the_first_failing_stage);
+    RUN_TEST(test_an_unsplit_connect_attempt_would_outlast_the_watchdog);
+    RUN_TEST(test_every_connect_stage_leaves_half_the_watchdog_as_margin);
     return UNITY_END();
 }
